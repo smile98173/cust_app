@@ -1,0 +1,47 @@
+# Environment files may contain API keys, passwords, tokens, or service URLs.
+.env
+.env.*
+!.env.example
+
+# Python caches and test artifacts.
+__pycache__/
+*.py[cod]
+*.pyc.*
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime state, local databases, and generated indexes.
+data/
+*.db
+*.db-*
+*.sqlite3
+*.pickle
+*.bin
+.tmp_chroma_*/
+
+# Generated reviews, replay results, and exported pages may contain customer data.
+reports/
+outputs/
+
+# Logs, process files, and temporary work directories.
+*.log
+*.pid
+.tmp/
+.tmp*
+.codex_test_output.txt
+
+# Local editor and agent metadata.
+.idea/
+.vscode/
+.codex/
+.agents/
+
+# Local business/test source documents are kept outside version control.
+*.xlsx
+*.xls
+*.docx
+
+# Operating-system files.
+Thumbs.db
+.DS_Store

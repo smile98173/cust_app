@@ -1,0 +1,5 @@
+cd D:\AI智能客服\cust_app
+activate cust_app
+python -m pytest tests -q
+uvicorn app.app_backend:app --host 127.0.0.1 --port 8123 --reload
+streamlit run app/web_ui.py --server.address 127.0.0.1 --server.port 8443 --server.baseUrlPath assistant --server.enableCORS false --server.enableXsrfProtection false

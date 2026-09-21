@@ -1,0 +1,21 @@
+{
+  "regions": {
+    "central": {
+      "billing.next_bill_after_no_unpaid": {
+        "reply": "您好，目前系統可協助查詢本期待繳帳單。待下期帳單產生後，請留意相關通知，謝謝。"
+      }
+    },
+    "jiannan": {
+      "billing.next_bill_after_no_unpaid": {
+        "reply": "您好，目前系統可協助查詢本期待繳帳單。待下期帳單產生後，請留意相關通知，謝謝。"
+      }
+    }
+  },
+  "stations": {
+    "大屯": {
+      "support.remote_control_price": {
+        "reply": "一般型遙控器 300 元、語音遙控器 400 元，保固一年；實際型號與是否需更換仍以客服或工程人員確認為準。"
+      }
+    }
+  }
+}

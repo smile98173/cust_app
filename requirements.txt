@@ -1,0 +1,26 @@
+numpy==1.26.4
+sentence-transformers==2.6.1
+transformers==4.41.2
+accelerate==0.30.1
+fastapi
+uvicorn
+streamlit
+requests
+pymongo
+langchain
+langchain-ollama
+langchain-openai
+# langgraph  # currently unused
+# langgraph-checkpoint-sqlite  # currently unused
+pydantic
+chromadb==1.5.8
+filelock==3.28.0
+openpyxl
+google-genai
+Pillow
+beautifulsoup4
+pypdf
+python-docx
+python-dotenv
+cryptography
+# pip install torch==2.3.0 torchvision==0.18.0 torchaudio==2.3.0 --index-url https://download.pytorch.org/whl/cu118
