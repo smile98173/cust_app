@@ -8,6 +8,7 @@
 
 ## 文件導覽
 
+- [`docs/main_program_architecture_quickstart.md`](docs/main_program_architecture_quickstart.md)：給新維護者的 15 分鐘主程式架構導覽與常見修改地圖。
 - `docs/README.md`：文件索引，區分現行操作文件與歷史紀錄。
 - `docs/active_customer_service_handoff_2026-09-14.md`：目前客服 AI 的架構、規則邊界與測試交接紀錄。
 - `docs/project_overview.md`：專案總覽、目前進度、近期變更紀錄與後續待辦。
@@ -67,7 +68,7 @@ chat_handler.py
 
 ## Router 架構更新
 
-每一則新的客戶訊息都必須先由 LLM 產生結構化意圖判斷；不得以關鍵字快速路由直接生成客服答案。既有流程的 state resolver 只用於承接已由 LLM 建立的流程狀態，例如補齊工具欄位或排錯步驟。
+每次需要新語意判斷時，由 LLM 產生結構化意圖決策；不得以關鍵字快速路由直接生成客服答案。既有流程的 state resolver 可承接已建立的流程狀態，例如補齊工具欄位或排錯步驟，不應重新推測產品意圖。
 
 Router 已整理成比較可擴展的結構：
 
@@ -207,6 +208,8 @@ python scripts/kb_build.py
 ---
 
 ## 啟動方式
+
+以下指令供服務管理者啟動或部署使用。客服 AI 情境測試只呼叫管理者已啟動的 8123，不得另外啟動或重啟；測試環境與短期 token 流程見 `docs/testing/ai_test_environment.md`。
 
 ```powershell
 uvicorn app.app_backend:app --host 127.0.0.1 --port 8123 --reload

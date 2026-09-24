@@ -36,6 +36,7 @@ label 可為：
 - refuse：表示不會弄、不想排錯、太麻煩、直接派人、我要報修
 - fault_report：在已開始排錯時，只是再次說「回報故障」或有錯字的「回報故髒」，未明確要求派人或立刻報修
 - device_replacement：表示更換了新的 Wi-Fi／網路設備後不能上網，但原本或舊設備可以正常使用
+- app_connectivity_detail：在機上盒聯網排錯中，使用者補充 Wi-Fi／網路訊號正常，但機上盒內的應用程式顯示無法連網；這是新的故障範圍資訊，不代表已執行目前步驟後仍失敗
 - unknown：無法判斷
 
 判斷原則：
@@ -47,6 +48,7 @@ label 可為：
 - 若已在排錯中，使用者只說「回報故障」或「回報故髒」，而沒有說要派人、立即報修或不想排錯，判斷為 fault_report；這是在重申問題，應繼續診斷，不是直接轉真人。
 - 若正在處理網路問題，且使用者說新設備不能用、換回舊設備就正常，判斷為 device_replacement。
   這代表原本網路服務可用，優先引導新設備的註冊方式，不要重複詢問所有設備或單一設備。
+- 若正在處理機上盒網路問題，使用者只是補充 Wi-Fi／網路訊號正常，但進入應用程式時顯示無法連網，判斷為 app_connectivity_detail。除非使用者同時明確說已完成重新連線、重開與其他應用程式測試仍失敗，否則不可判斷為 failed。
 - 若使用者只是說不知道、不會看、不確定，判斷為 unknown；不要硬猜。
 
 只能輸出 JSON：
@@ -95,7 +97,45 @@ STEP_CONTEXTS = {
     "net_unstable_scope": "正在確認網路不穩、遊戲或 APP 斷線，是所有服務/設備都會發生，還是只在特定遊戲、影片或 APP 發生；使用者不一定是完全不能上網。",
     "net_slow_scope": "正在確認是所有網站/APP 都很慢，還是只有特定遊戲、影片或 APP 很慢。",
     "net_slow_specific": "正在確認特定遊戲、影片或 APP 的問題是否也影響其他服務或測速結果。",
+    "net_router_path_check": "已確認速度問題集中在路由器路徑，正在比較電腦直連數據機與經路由器連線的測速結果。",
+    "net_device_registration": "已請使用者確認新路由器的 WAN／Internet 接線及 DHCP／自動取得 IP，正在確認設定後能否上網。",
+    "net_manual_device_registration": "已引導使用者至官網手動完成設備註冊，正在確認註冊後能否上網。",
     "net_wired_connection_check": "使用者補充目前直接接網路孔或網路線，正在確認有線連接、孔位與影響範圍。",
+    "stb_network_check": "正在排除哈TV機上盒本身的網路連線，需確認其他裝置是否正常、機上盒網路設定與重新連線結果。",
+    "stb_app_connectivity_check": "已確認機上盒 Wi-Fi 訊號正常但應用程式無法連線，正在確認重新連線、重開機上盒及其他應用程式測試結果。",
+}
+
+
+SET_TOP_BOX_NETWORK_INTENTS = {
+    "tv_set_top_box_network_connection_issue",
+    "hatv_set_top_box_network_connection_issue",
+    "tv_set_top_box_app_network_issue",
+}
+
+ROUTER_PATH_SLOW_INTENTS = {
+    "router_path_slow_issue",
+    "router_bottleneck_issue",
+}
+
+ROUTER_REGISTRATION_INTENTS = {
+    "new_device_registration_issue",
+    "router_replacement_registration_issue",
+}
+
+TV_PICTURE_QUALITY_INTENTS = {
+    "tv_picture_quality_issue",
+    "tv_channel_jitter_issue",
+    "tv_channel_picture_jitter_issue",
+    "tv_channel_picture_audio_issue",
+    "tv_picture_audio_issue",
+}
+
+REMOTE_CONTROL_TROUBLESHOOTING_INTENTS = {
+    "remote_control_issue",
+    "tv_remote_control_issue",
+    "tv_remote_control_channel_issue",
+    "remote_control_channel_selection_issue",
+    "remote_control_button_issue",
 }
 
 
@@ -132,7 +172,8 @@ def classify_reply(text: str, step: str, issue_description: str = "", llm=None) 
         data = safe_json_loads(resp.content)
         label = data.get("label", "unknown")
         if label not in [
-            "affirmative", "negative", "recovered", "failed", "refuse", "fault_report", "device_replacement", "unknown",
+            "affirmative", "negative", "recovered", "failed", "refuse", "fault_report",
+            "device_replacement", "app_connectivity_detail", "unknown",
         ]:
             return "unknown"
         return label
@@ -1339,17 +1380,202 @@ def start_troubleshooting_by_type(
     return start_tv_troubleshooting(user_text, memory, plan)
 
 
-def switch_to_repair(memory: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
+def switch_to_repair(
+    memory: Dict[str, Any],
+    plan: Dict[str, Any],
+    reply: str = "",
+) -> Dict[str, Any]:
     known = memory.setdefault("known_info", {})
 
     known["troubleshooting_started"] = "no"
     known["troubleshooting_failed"] = "yes"
     known["repair_ready"] = "yes"
 
-    plan["reply"] = "了解，我幫您安排報修。"
-    plan["should_call_tool"] = True
-    plan["tool_name"] = "create_repair_ticket"
+    plan["intent"] = "human_handoff_offer"
+    plan["decision_type"] = "clarify"
+    plan["reply"] = reply or (
+        "了解，前面的排除步驟完成後仍無法恢復。"
+        "請問是否需要幫您轉接真人文字客服協助後續處理？"
+    )
+    plan["should_call_tool"] = False
+    plan["tool_name"] = None
 
+    return plan
+
+
+def start_set_top_box_network_troubleshooting(
+    user_text: str,
+    memory: Dict[str, Any],
+    plan: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Start a device-scoped flow without treating home broadband as down."""
+    known = memory.setdefault("known_info", {})
+    known["troubleshooting_started"] = "yes"
+    known["troubleshooting_type"] = "set_top_box_network"
+    known["troubleshooting_step"] = (
+        "stb_app_connectivity_check"
+        if plan.get("intent") == "tv_set_top_box_app_network_issue"
+        else "stb_network_check"
+    )
+    known["troubleshooting_failed"] = "no"
+    known["repair_ready"] = "no"
+    known["issue_description"] = user_text
+    known["retry"] = 0
+
+    if known["troubleshooting_step"] == "stb_app_connectivity_check":
+        plan["reply"] = (
+            "Wi-Fi 顯示訊號正常但應用程式無法連線時，請先在機上盒的網路設定中"
+            "將目前 Wi-Fi 中斷後重新連線，再將機上盒電源拔除約 10 秒後重新啟動。"
+            "完成後請測試另一個需要網路的應用程式，確認是單一應用程式還是所有聯網功能都無法使用。"
+        )
+    else:
+        plan["reply"] = (
+            "請先確認家中手機或電腦是否可以正常上網。若其他裝置正常，問題較可能集中在機上盒：\n"
+            "1. 到機上盒的網路設定確認已連上正確的 Wi-Fi，使用網路線時則確認兩端插緊。\n"
+            "2. 將機上盒電源拔除約 10 秒後重新啟動。\n"
+            "3. 重新連線後測試另一個需要網路的應用程式。\n"
+            "完成後請告訴我是單一應用程式，還是機上盒所有聯網功能都無法使用。"
+        )
+    plan["should_call_tool"] = False
+    plan["tool_name"] = None
+    return plan
+
+
+def continue_set_top_box_network_troubleshooting(
+    user_text: str,
+    memory: Dict[str, Any],
+    plan: Dict[str, Any],
+    llm=None,
+) -> Dict[str, Any]:
+    known = memory.setdefault("known_info", {})
+
+    if known.get("repair_ready") == "yes" or known.get("repair_followup_active") == "yes":
+        return switch_to_repair(
+            memory,
+            plan,
+            reply=(
+                "已確認家中網路正常，問題仍集中在哈TV機上盒的聯網功能，"
+                "不會再要求您重做一般數據機排錯。"
+                "請問是否需要幫您轉接真人文字客服處理？"
+            ),
+        )
+
+    step = str(known.get("troubleshooting_step") or "stb_network_check")
+    label = classify_reply(
+        user_text,
+        step,
+        issue_description=str(known.get("issue_description") or ""),
+        llm=llm,
+    )
+    known["_llm_step_classifier_used"] = "yes" if llm is not None else "no"
+
+    if label == "recovered":
+        return finish_troubleshooting(memory, plan)
+    if label == "refuse":
+        known["issue_description"] = user_text
+        return switch_to_repair(memory, plan)
+
+    if (
+        (
+            plan.get("intent") == "tv_set_top_box_app_network_issue"
+            or label == "app_connectivity_detail"
+        )
+        and step != "stb_app_connectivity_check"
+    ):
+        known["troubleshooting_step"] = "stb_app_connectivity_check"
+        known["issue_description"] = user_text
+        plan["reply"] = (
+            "了解，訊號強度正常不代表機上盒的應用程式已成功連上網路。"
+            "請先在機上盒網路設定中將 Wi-Fi 中斷後重新連線，再重開機上盒，"
+            "並測試另一個需要網路的應用程式。若所有聯網功能仍無法使用，我會接續協助報修。"
+        )
+        plan["should_call_tool"] = False
+        plan["tool_name"] = None
+        return plan
+
+    if label == "failed":
+        known["issue_description"] = user_text
+        return switch_to_repair(memory, plan)
+
+    if plan.get("intent") == "tv_set_top_box_app_network_issue":
+        plan["reply"] = (
+            "請先將機上盒目前的 Wi-Fi 中斷後重新連線，再重開機上盒，"
+            "並測試另一個需要網路的應用程式。若所有聯網功能仍無法使用，"
+            "我會接續協助報修。"
+        )
+        plan["should_call_tool"] = False
+        plan["tool_name"] = None
+        return plan
+
+    plan["reply"] = (
+        "目前會繼續針對哈TV機上盒本身排除，不會改成一般寬頻斷線流程。"
+        "請確認機上盒已重新連接 Wi-Fi 或網路線並重開機，接著測試另一個聯網應用程式；"
+        "再告訴我是單一應用程式，還是所有聯網功能都無法使用。"
+    )
+    plan["should_call_tool"] = False
+    plan["tool_name"] = None
+    return plan
+
+
+def start_router_path_troubleshooting(
+    user_text: str,
+    memory: Dict[str, Any],
+    plan: Dict[str, Any],
+) -> Dict[str, Any]:
+    known = memory.setdefault("known_info", {})
+    known["troubleshooting_started"] = "yes"
+    known["troubleshooting_type"] = "network"
+    known["troubleshooting_step"] = "net_router_path_check"
+    known["troubleshooting_failed"] = "no"
+    known["repair_ready"] = "no"
+    known["issue_description"] = user_text
+    known["retry"] = 0
+    plan["reply"] = (
+        "若只有經過路由器時速度變慢，請先比較電腦直接用網路線連接數據機，"
+        "以及經路由器連線時的測速結果。也請確認：\n"
+        "1. 路由器未啟用 QoS、流量控制或家長監護限速。\n"
+        "2. 無線裝置改連 5 GHz 頻段測試。\n"
+        "3. 路由器 WAN／LAN 埠與網路線支援 Gigabit（1000 Mbps）。\n"
+        "可使用 https://www.tinp.net.tw/ 的「網速推薦工具」進行測速。"
+        "若直連數據機正常、經路由器才慢，通常需調整路由器設定或由設備原廠協助。"
+    )
+    plan["should_call_tool"] = False
+    plan["tool_name"] = None
+    return plan
+
+
+def continue_router_path_troubleshooting(
+    user_text: str,
+    memory: Dict[str, Any],
+    plan: Dict[str, Any],
+    llm=None,
+) -> Dict[str, Any]:
+    known = memory.setdefault("known_info", {})
+    label = classify_reply(
+        user_text,
+        "net_router_path_check",
+        issue_description=str(known.get("issue_description") or ""),
+        llm=llm,
+    )
+    known["_llm_step_classifier_used"] = "yes" if llm is not None else "no"
+    if label == "recovered":
+        return finish_troubleshooting(memory, plan)
+    if label == "refuse":
+        return switch_to_repair(memory, plan)
+    if label == "failed":
+        failed_count = int(known.get("router_path_failed_count") or 0) + 1
+        known["router_path_failed_count"] = failed_count
+        if failed_count >= 2:
+            return switch_to_repair(memory, plan)
+
+    known["retry"] = int(known.get("retry") or 0) + 1
+    plan["reply"] = (
+        "請回覆兩個測速結果：電腦直連數據機的速度，以及經路由器連線的速度。"
+        "若直連正常、經路由器才慢，可優先關閉 QoS／家長監護限速、改用 5 GHz，"
+        "並確認埠口與網路線支援 Gigabit；仍未改善時再由路由器原廠協助檢查設定。"
+    )
+    plan["should_call_tool"] = False
+    plan["tool_name"] = None
     return plan
 
 
@@ -2677,6 +2903,13 @@ def apply_tv_troubleshooting_step(
         return plan
 
     if step == "tv_rescan_channels":
+        # The model has identified that the same picture-quality symptom is
+        # still present after this flow already supplied the rescan step.
+        # Advance instead of emitting the identical instructions again.
+        if plan.get("intent") in TV_PICTURE_QUALITY_INTENTS:
+            known["issue_description"] = text
+            return switch_to_repair(memory, plan)
+
         context = parse_troubleshooting_context(text)
         if (
             context.get("symptom_type") == "picture_quality"
@@ -2802,11 +3035,59 @@ def apply_network_troubleshooting_step(
         known["troubleshooting_step"] = "net_device_registration"
         known["retry"] = 0
         plan["reply"] = (
-            "了解，原本設備可以正常上網，表示線路服務大致正常，新的設備可能尚未完成註冊。\n\n"
-            "請先將新設備連接到網路數據機後重新啟動電腦或設備，再測試是否可以上網。"
-            "若仍未自動完成註冊，可至台基科官網 https://www.tinp.net.tw/ → 會員專區 → 電腦網卡更換註冊，"
-            "依頁面提示完成登入或驗證後，再重新啟動設備即可。"
+            "了解，原本設備可以正常上網，表示線路服務大致正常。"
+            "請先確認新路由器的 WAN／Internet 埠已接到數據機 LAN 埠，"
+            "並將上網方式設為「DHCP／自動取得 IP」，再測試是否可以上網。"
         )
+        plan["should_call_tool"] = False
+        plan["tool_name"] = None
+        return plan
+
+    if step == "net_device_registration":
+        if label == "recovered":
+            return finish_troubleshooting(memory, plan)
+
+        if label in {"failed", "affirmative"}:
+            known["troubleshooting_step"] = "net_manual_device_registration"
+            known["retry"] = 0
+            plan["reply"] = (
+                "若已確認使用 DHCP／自動取得 IP 仍無法上網，請至台基科官網 "
+                "https://www.tinp.net.tw/ → 會員專區 →「電腦網卡更換註冊」，"
+                "依畫面完成手動註冊後，再重新啟動路由器測試。"
+            )
+        elif label == "refuse":
+            known["troubleshooting_failed"] = "yes"
+            known["repair_ready"] = "yes"
+            known["retry"] = 0
+            plan["intent"] = "human_handoff_offer"
+            plan["reply"] = "若不方便自行確認設定，請問是否需要幫您轉接真人文字客服？"
+        else:
+            plan["reply"] = (
+                "請先確認新路由器的 WAN／Internet 埠已接到數據機 LAN 埠，"
+                "並將上網方式設為「DHCP／自動取得 IP」，再告訴我是否可以上網。"
+            )
+        plan["should_call_tool"] = False
+        plan["tool_name"] = None
+        return plan
+
+    if step == "net_manual_device_registration":
+        if label == "recovered":
+            return finish_troubleshooting(memory, plan)
+
+        if label in {"failed", "refuse"}:
+            known["troubleshooting_failed"] = "yes"
+            known["repair_ready"] = "yes"
+            known["retry"] = 0
+            plan["intent"] = "human_handoff_offer"
+            plan["reply"] = (
+                "手動註冊後仍無法上網，需要由客服進一步確認。"
+                "請問是否需要幫您轉接真人文字客服？"
+            )
+            plan["should_call_tool"] = False
+            plan["tool_name"] = None
+            return plan
+
+        plan["reply"] = "請問完成官網手動註冊並重新啟動路由器後，是否已可以上網？"
         plan["should_call_tool"] = False
         plan["tool_name"] = None
         return plan
@@ -3302,6 +3583,42 @@ def apply_troubleshooting_engine(
     known = memory.setdefault("known_info", {})
     text = (user_text or "").strip()
 
+    # These flows are entered from the LLM's semantic intent, then continued
+    # from trusted state. They do not infer a route from customer keywords.
+    if known.get("troubleshooting_type") == "set_top_box_network":
+        return continue_set_top_box_network_troubleshooting(
+            text,
+            memory,
+            plan,
+            llm=llm,
+        )
+    if plan.get("intent") in SET_TOP_BOX_NETWORK_INTENTS:
+        return start_set_top_box_network_troubleshooting(text, memory, plan)
+
+    if known.get("troubleshooting_step") == "net_router_path_check":
+        return continue_router_path_troubleshooting(
+            text,
+            memory,
+            plan,
+            llm=llm,
+        )
+    if plan.get("intent") in ROUTER_PATH_SLOW_INTENTS:
+        return start_router_path_troubleshooting(text, memory, plan)
+
+    if (
+        known.get("troubleshooting_started") != "yes"
+        and plan.get("intent") == "repair_troubleshooting_intake"
+    ):
+        troubleshooting_type = detect_troubleshooting_type(text)
+        if troubleshooting_type:
+            return start_troubleshooting_by_type(
+                troubleshooting_type,
+                text,
+                memory,
+                plan,
+            )
+        return ask_fault_category(memory, plan)
+
     if is_tv_authorization_expired_issue(text):
         return reply_tv_authorization_payment(memory, plan)
     if is_tv_unauthorized_channel_issue(text):
@@ -3309,17 +3626,14 @@ def apply_troubleshooting_engine(
 
     if is_outdoor_service_line_issue(text):
         known["issue_description"] = text
-        known["troubleshooting_started"] = "no"
-        known["troubleshooting_failed"] = "yes"
-        known["repair_ready"] = "yes"
-        plan["reply"] = (
-            "室外線路鬆脫可能有安全風險，請勿自行碰觸或嘗試接回；"
-            "我會提供維修申告方式，由工程人員檢查處理。"
+        return switch_to_repair(
+            memory,
+            plan,
+            reply=(
+                "室外線路鬆脫可能有安全風險，請勿自行碰觸或嘗試接回。"
+                "此狀況不適合自行排除，請問是否需要幫您轉接真人文字客服安排檢查？"
+            ),
         )
-        plan["should_call_tool"] = True
-        plan["tool_name"] = "create_repair_ticket"
-        plan["preserve_reply_when_tool_disabled"] = True
-        return plan
 
     if (
         known.get("repair_followup_active") == "yes"
@@ -3327,21 +3641,46 @@ def apply_troubleshooting_engine(
     ):
         prior_issue = str(known.get("issue_description") or "")
         if is_outdoor_service_line_issue(prior_issue):
-            plan["reply"] = (
+            reply = (
                 "若您確認室外線路確實有鬆脫，請勿自行碰觸或嘗試接回；"
-                "請使用維修申告，由工程人員檢查處理。"
+                "請問是否需要幫您轉接真人文字客服安排工程人員檢查？"
             )
         else:
-            plan["reply"] = "已收到您的故障回報，請使用維修申告安排後續檢查。"
-        plan["should_call_tool"] = True
-        plan["tool_name"] = "create_repair_ticket"
-        plan["preserve_reply_when_tool_disabled"] = True
-        return plan
+            reply = (
+                "已收到您的故障回報。"
+                "請問是否需要幫您轉接真人文字客服安排後續檢查？"
+            )
+        return switch_to_repair(memory, plan, reply=reply)
+
+    # Once the same picture-quality issue has reached repair, continuing
+    # symptoms should stay in that flow instead of restarting channel rescan.
+    repair_picture_context = parse_troubleshooting_context(text)
+    if (
+        known.get("repair_followup_active") == "yes"
+        and known.get("repair_flow_status") == "disabled"
+        and known.get("troubleshooting_type") == "tv"
+        and known.get("troubleshooting_failed") == "yes"
+        and (
+            plan.get("intent") in TV_PICTURE_QUALITY_INTENTS
+            or repair_picture_context.get("symptom_type") == "picture_quality"
+        )
+    ):
+        return switch_to_repair(
+            memory,
+            plan,
+            reply=(
+                "已記錄畫面仍有抖動或異音，不需要再重複恢復預設或重新搜頻。"
+                "請問是否需要幫您轉接真人文字客服處理？"
+            ),
+        )
 
     # Keep the model's current-turn semantic decision authoritative. A prior
     # repair hand-off must not turn a newly described picture-quality symptom
     # into a generic hand-off or consume it as an answer to an old SOP step.
-    if plan.get("intent") == "tv_picture_quality_issue":
+    if (
+        plan.get("intent") in TV_PICTURE_QUALITY_INTENTS
+        and known.get("troubleshooting_started") != "yes"
+    ):
         if is_tv_signal_or_playback_issue(text):
             known.pop("repair_followup_active", None)
             known.pop("repair_flow_status", None)
@@ -3391,16 +3730,14 @@ def apply_troubleshooting_engine(
         and (is_tv_equipment_boot_issue(text) or is_tv_boot_loop_reply(text))
     ):
         if is_tv_boot_loop_reply(str(known.get("issue_description") or "")):
-            known["troubleshooting_started"] = "no"
-            known["troubleshooting_failed"] = "yes"
-            known["repair_ready"] = "no"
-            plan["reply"] = (
-                "已記錄機上盒重開後仍停在開機畫面，目前維持報修處理，"
-                "不需要再重複重新插電。"
+            return switch_to_repair(
+                memory,
+                plan,
+                reply=(
+                    "已記錄機上盒重開後仍停在開機畫面，不需要再重複重新插電。"
+                    "請問是否需要幫您轉接真人文字客服處理？"
+                ),
             )
-            plan["should_call_tool"] = False
-            plan["tool_name"] = None
-            return plan
         known.pop("repair_followup_active", None)
         known.pop("repair_flow_status", None)
         known["troubleshooting_started"] = "yes"
@@ -3435,7 +3772,6 @@ def apply_troubleshooting_engine(
         plan["tool_name"] = None
         return plan
 
-    repair_picture_context = parse_troubleshooting_context(text)
     if (
         known.get("repair_followup_active") == "yes"
         and repair_picture_context.get("symptom_type") == "picture_quality"
@@ -3492,30 +3828,22 @@ def apply_troubleshooting_engine(
             if has_known_speed_gap:
                 declared = float(known["declared_plan_speed_mbps"])
                 measured = float(known["download_speed"])
-                plan["reply"] = (
+                reply = (
                     f"已保留您申辦 {declared:g} Mbps、實測約 {measured:g} Mbps 的結果，"
-                    "目前維持報修處理，不需要再重複測速。"
+                    "不需要再重複測速。請問是否需要幫您轉接真人文字客服處理？"
                 )
             elif has_known_tv_no_power:
-                plan["reply"] = (
-                    "已記錄機上盒有插電但電源燈仍未亮，目前維持報修處理，"
-                    "不需要再重複確認燈號。"
+                reply = (
+                    "已記錄機上盒有插電但電源燈仍未亮，不需要再重複確認燈號。"
+                    "請問是否需要幫您轉接真人文字客服處理？"
                 )
             else:
-                plan["reply"] = (
-                    "已收到您補充的狀況，目前維持報修處理。"
-                    "若有新的燈號、錯誤畫面或設備狀況，也可以直接告訴我，我再協助判讀。"
+                reply = (
+                    "已收到您補充的狀況。"
+                    "請問是否需要幫您轉接真人文字客服協助後續處理？"
                 )
-            plan["should_call_tool"] = False
-            plan["tool_name"] = None
-            return plan
-        if known["repair_followup_count"] == 1:
-            plan["reply"] = "了解，前面簡單排除後仍無法恢復，我會維持報修處理。"
-        else:
-            plan["reply"] = "已了解，這個狀況會持續以報修處理，不需要再重複排錯。"
-        plan["should_call_tool"] = True
-        plan["tool_name"] = "create_repair_ticket"
-        return plan
+            return switch_to_repair(memory, plan, reply=reply)
+        return switch_to_repair(memory, plan)
 
     # The marker only carries a related short continuation. A clear new topic
     # must be allowed to route normally instead of being held in repair mode.
@@ -3526,7 +3854,7 @@ def apply_troubleshooting_engine(
     # fall back to an undifferentiated category question.
     if (
         known.get("troubleshooting_started") != "yes"
-        and plan.get("intent") == "remote_control_issue"
+        and plan.get("intent") in REMOTE_CONTROL_TROUBLESHOOTING_INTENTS
     ):
         return start_remote_control_troubleshooting(text, memory, plan)
 
@@ -3570,7 +3898,7 @@ def apply_troubleshooting_engine(
 
     if (
         known.get("troubleshooting_started") != "yes"
-        and plan.get("intent") == "new_device_registration_issue"
+        and plan.get("intent") in ROUTER_REGISTRATION_INTENTS
     ):
         known["troubleshooting_started"] = "yes"
         known["troubleshooting_type"] = "network"

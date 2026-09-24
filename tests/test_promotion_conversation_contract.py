@@ -5,6 +5,7 @@ from unittest.mock import patch
 from langchain_core.runnables import RunnableLambda
 
 from app.handlers.chat_handler import (
+    build_campaign_rate_followup_reply,
     constrain_promotion_documents,
     handle_chat_message,
 )
@@ -306,6 +307,41 @@ class PromotionConversationContractTest(unittest.TestCase):
         self.assertEqual([doc["document_id"] for doc in combo_docs], ["combo"])
         self.assertEqual(tv_docs, [pure_tv])
         self.assertEqual(explicit_social_docs, [social])
+
+    def test_campaign_detail_uses_remembered_dynamic_campaign(self):
+        first = campaign_doc(
+            "動態方案 A",
+            "純網寬頻",
+            "100M/10M：年繳 7,200 元。",
+            "dynamic-a",
+        )
+        selected = campaign_doc(
+            "動態方案 B",
+            "純網寬頻",
+            "100M/100M：年繳 5,400 元。",
+            "dynamic-b",
+        )
+
+        detail_docs = constrain_promotion_documents(
+            [first, selected],
+            "pure_network",
+            "campaign_detail",
+            memory={"known_info": {"last_campaign_topic": "動態方案 B"}},
+        )
+
+        self.assertEqual(
+            [doc["document_id"] for doc in detail_docs],
+            ["dynamic-b"],
+        )
+
+        reply = build_campaign_rate_followup_reply(
+            "100M/100M年繳",
+            detail_docs,
+            memory={"known_info": {"last_campaign_topic": "動態方案 B"}},
+        )
+
+        self.assertEqual(reply, "動態方案 B\n100M/100M：年繳 5,400 元")
+        self.assertNotIn("月繳", reply)
 
 
 if __name__ == "__main__":

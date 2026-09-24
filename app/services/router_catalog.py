@@ -414,6 +414,56 @@ CLARIFY_CONTEXTS = {
             },
         }
     },
+    "方案轉換目標": {
+        "prompt": "請問您想轉換成哪一類新方案？",
+        "options": {
+            "純網路": {
+                "route": "knowledge_query",
+                "intent": "pure_network_install_plan_query",
+                "topic": "純網方案",
+                "promotion_scope": "pure_network",
+                "promotion_query_kind": "catalog",
+                "social_discount_requested": False,
+                "knowledge_query": (
+                    "目前有效的純網方案總覽 純網方案 一般寬頻方案 單辦寬頻 單辦網路 "
+                    "方案名稱 服務類型 活動期間 排除電視同裝與社福優惠"
+                ),
+                "reply": "",
+            },
+            "純有線電視": {
+                "route": "knowledge_query",
+                "intent": "pure_tv_promotion_query",
+                "topic": "單辦有線電視優惠",
+                "promotion_scope": "pure_tv",
+                "promotion_query_kind": "catalog",
+                "social_discount_requested": False,
+                "knowledge_query": (
+                    "純有線電視 單辦有線電視 第四台 基本收費標準 基本收視費 "
+                    "月繳 季繳 半年繳 年繳 裝機費"
+                ),
+                "reply": "",
+            },
+            "有線電視＋網路": {
+                "route": "knowledge_query",
+                "intent": "tv_network_install_plan_query",
+                "topic": "電視+網路方案",
+                "promotion_scope": "tv_network",
+                "promotion_query_kind": "catalog",
+                "social_discount_requested": False,
+                "knowledge_query": (
+                    "同時申裝有線電視與寬頻網路 電視+網路方案 電視網路同裝方案 "
+                    "方案名稱 活動期間 速率 月租 贈品 裝機費 違約金"
+                ),
+                "reply": "",
+            },
+            "已有指定方案": {
+                "route": "clarify",
+                "intent": "named_plan_clarification",
+                "topic": "指定方案名稱",
+                "reply": "請輸入想更換的方案名稱。",
+            },
+        },
+    },
     "公司資訊": {
         "options": {
             "公司地址": {

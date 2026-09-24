@@ -8,7 +8,7 @@
 - `router_catalog.py` 僅提供 LLM 可讀的 route、工具白名單、澄清選項與語意約束；不可用它的關鍵字直接產生客服答案。
 - `router_guard()` 只做結構與安全保護，例如修正不存在的工具、禁止不相容欄位；不得覆寫有效的 LLM 意圖或依關鍵字回答客戶。
 - LLM 路由無法使用或回傳無效 JSON 時，固定回覆 `系統暫時無法判讀您的需求，請稍後再試。`，不退回舊規則回答。
-- `fallback_router()` 已停用語意降級，只能回傳 `model_router_unavailable`，不得依關鍵字產生 route 或客服答案。
+- 模型失敗時由 `run_intent_router()` 直接回傳封閉的 `model_router_unavailable` 結果；沒有語意關鍵字 fallback。
 - 已進行中的排錯步驟、帳務授權、工具防重送與真人轉接保護可以使用確定性狀態機；這些規則只能限制動作，不可推測產品語意或直接產生知識答案。
 
 ## 動態選項與文件鎖定
@@ -64,7 +64,7 @@
 - `knowledge_query` 不允許 `tool_name` 或 `should_call_tool`。
 - `clarify`、`unsupported_flow`、`smalltalk` 不跑 RAG。
 - 排錯流程中的短回答交回 troubleshooting state machine。
-- 排錯流程中若使用者回覆 `不知道`、`不清楚`、`沒用`、`不行`、`不要` 或其他拒絕排錯語意，state machine 會直接轉報修流程；若報修工具停用，回報修暫停訊息並附維修申告連結。
+- 排錯後仍無法恢復，或使用者明確無法操作時，state machine 結束排錯並提供維修申告表單，同時詢問是否轉真人；同一故障再次出現時不重跑排錯。只有使用者同意後才轉真人，不直接建立報修工單。
 
 ## 測試契約
 
@@ -72,7 +72,7 @@
 - 模型失敗測試必須斷言 `model_router_unavailable`，不得期待關鍵字規則仍能回答。
 - clarify 選項測試由模型回傳 `selected_option_id`，再斷言後端只接受對話狀態中已存在的 ID。
 - 只有已進入的排錯步驟、等待中的工具欄位驗證、授權與防重送能不呼叫語意模型。
-- 舊 `test_flow_regressions.py` 混合了已停用的規則路由契約，目前作為歷史案例封存；現行架構以 `test_model_only_routing.py` 與 `test_model_router_contract.py` 為準。
+- 已移除全數跳過的舊規則路由測試與直接測試關鍵詞回覆的案例；現行架構以 `test_model_only_routing.py`、`test_model_router_contract.py` 及透過 8123 執行的真實對話重播驗證。
 
 ## 真人客服轉接
 
@@ -97,12 +97,12 @@ Router 判定使用者明確要求真人接手、人工客服、專人協助、�
 ```json
 {
   "route": "clarify",
-  "intent": "human_handoff_confirmation",
-  "topic": "human_handoff_confirmation",
-  "reply": "請問您目前遇到什麼問題？我會先協助您處理；若確認無法在線上協助，再幫您轉接真人客服。"
+  "intent": "human_handoff_triage",
+  "topic": "真人客服問題",
+  "reply": "可以，請先告訴我遇到什麼問題，我會先協助確認；若仍需要真人客服，我會提供轉接方式。"
 }
 ```
 
-下一輪使用者回覆 `是`、`好`、`OK`、`可以` 等短肯定語時，轉成 `human_handoff_request`。若回覆 `不用`、`不要`、`先不用`，則取消轉接確認並繼續一般協助。
+若已知具體問題且系統詢問是否轉真人，下一輪使用者明確同意才轉成 `human_handoff_request`；拒絕時取消邀請。尚未說明問題的短答仍應先釐清需求，不能直接轉接。
 
 注意：單純詢問客服電話、營業時間或聯絡方式，不應輸出 `human_handoff_request`，應依公司資訊或知識查詢處理。

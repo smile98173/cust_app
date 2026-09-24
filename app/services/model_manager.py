@@ -66,6 +66,46 @@ def record_llm_trace_event(event: Dict[str, Any]) -> None:
         events.append(event)
 
 
+def extract_llm_token_usage(result: Any) -> Dict[str, int]:
+    """Normalize LangChain/OpenAI token metadata for request diagnostics."""
+    usage = getattr(result, "usage_metadata", None)
+    usage = usage if isinstance(usage, dict) else {}
+    response_metadata = getattr(result, "response_metadata", None)
+    response_metadata = response_metadata if isinstance(response_metadata, dict) else {}
+    provider_usage = response_metadata.get("token_usage") or response_metadata.get("usage") or {}
+    provider_usage = provider_usage if isinstance(provider_usage, dict) else {}
+
+    def token_value(*keys: str) -> int:
+        for source in (usage, provider_usage):
+            for key in keys:
+                value = source.get(key)
+                if isinstance(value, bool):
+                    continue
+                if isinstance(value, (int, float)) and value >= 0:
+                    return int(value)
+        return 0
+
+    normalized = {
+        "input_tokens": token_value("input_tokens", "prompt_tokens"),
+        "output_tokens": token_value("output_tokens", "completion_tokens"),
+        "total_tokens": token_value("total_tokens"),
+    }
+    if not normalized["total_tokens"]:
+        normalized["total_tokens"] = normalized["input_tokens"] + normalized["output_tokens"]
+
+    input_details = usage.get("input_token_details")
+    input_details = input_details if isinstance(input_details, dict) else {}
+    cached_tokens = input_details.get("cache_read") or provider_usage.get("cached_tokens")
+    if isinstance(cached_tokens, (int, float)) and not isinstance(cached_tokens, bool):
+        normalized["cached_input_tokens"] = max(0, int(cached_tokens))
+
+    return {
+        key: value
+        for key, value in normalized.items()
+        if value
+    }
+
+
 class ModelManager:
     def __init__(
         self,
@@ -223,6 +263,7 @@ class ModelManager:
                 "success": True,
                 "fallback": False,
                 "duration_sec": round(duration_sec, 3),
+                **extract_llm_token_usage(result),
             })
             return result
         except Exception as exc:
@@ -264,6 +305,7 @@ class ModelManager:
                     "success": True,
                     "fallback": True,
                     "duration_sec": round(fallback_duration_sec, 3),
+                    **extract_llm_token_usage(result),
                 })
                 return result
             except Exception as fallback_exc:

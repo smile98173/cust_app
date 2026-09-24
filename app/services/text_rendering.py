@@ -12,6 +12,8 @@ HTML_ANCHOR_RE = re.compile(
     flags=re.IGNORECASE | re.DOTALL,
 )
 HTML_TAG_RE = re.compile(r"<[^>]+>")
+MARKDOWN_HTTP_LINK_RE = re.compile(r"\[[^\]\n]+\]\(https?://[^\s)]+\)")
+PLAIN_HTTP_URL_RE = re.compile(r"https?://[A-Za-z0-9\-._~:/?#@!$&'*+=%;]+")
 
 
 def escape_streamlit_markdown_literals(text: str) -> str:
@@ -31,6 +33,36 @@ def html_anchors_to_markdown(text: str) -> str:
         return f"[{label}]({url})"
 
     return HTML_ANCHOR_RE.sub(replace, raw)
+
+
+def linkify_plain_http_urls(text: str, label: str = "開啟連結") -> str:
+    """Linkify bare URLs without nesting links already written as Markdown."""
+
+    raw = str(text or "")
+
+    def linkify_segment(segment: str) -> str:
+        def replace(match: re.Match) -> str:
+            url = match.group(0)
+            next_character = segment[match.end():match.end() + 1]
+            separator = (
+                " "
+                if next_character
+                and not next_character.isspace()
+                and next_character not in "，。；、,.;:：)]】"
+                else ""
+            )
+            return f"[{label}]({url}){separator}"
+
+        return PLAIN_HTTP_URL_RE.sub(replace, segment)
+
+    parts: list[str] = []
+    cursor = 0
+    for match in MARKDOWN_HTTP_LINK_RE.finditer(raw):
+        parts.append(linkify_segment(raw[cursor:match.start()]))
+        parts.append(match.group(0))
+        cursor = match.end()
+    parts.append(linkify_segment(raw[cursor:]))
+    return "".join(parts)
 
 
 def text_linebreaks_to_html(text: str) -> str:

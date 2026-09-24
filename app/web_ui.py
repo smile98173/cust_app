@@ -67,6 +67,7 @@ from app.services.knowledge_base_policy import (  # noqa: E402
 from app.services.text_rendering import (  # noqa: E402
     escape_streamlit_markdown_literals,
     html_anchors_to_markdown,
+    linkify_plain_http_urls,
     text_linebreaks_to_html,
 )
 
@@ -2567,6 +2568,37 @@ def save_feedback_tracker_item(feedback_id: str, payload: dict):
             "PUT",
             f"{API_BASE}/api/feedback-tracker/feedback/{quote(feedback_id, safe='')}",
             json=payload,
+            timeout=20,
+            actor=True,
+        )
+        if response.status_code == 200:
+            return response.json()
+        return {"status": "error", "message": backend_error_message(response)}
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+
+def edit_feedback_tracker_suggestion(feedback_id: str, suggestion: str):
+    try:
+        response = backend_request(
+            "PATCH",
+            f"{API_BASE}/api/feedback-tracker/feedback/{quote(feedback_id, safe='')}/suggestion",
+            json={"suggestion": suggestion},
+            timeout=20,
+            actor=True,
+        )
+        if response.status_code == 200:
+            return response.json()
+        return {"status": "error", "message": backend_error_message(response)}
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+
+def delete_feedback_tracker_item(feedback_id: str):
+    try:
+        response = backend_request(
+            "DELETE",
+            f"{API_BASE}/api/feedback-tracker/feedback/{quote(feedback_id, safe='')}",
             timeout=20,
             actor=True,
         )
@@ -5282,8 +5314,7 @@ def preserve_markdown_linebreaks(text: str, linkify_links: bool = True) -> str:
     return rendered.replace("\n", "  \n")
 
 
-TRACKER_URL_BODY = r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+=%]+"
-TRACKER_PLAIN_URL_PATTERN = re.compile(rf"(?<!\]\(){TRACKER_URL_BODY}")
+TRACKER_URL_BODY = r"https?://[A-Za-z0-9\-._~:/?#@!$&'*+=%;]+"
 TRACKER_BRACKETED_LINK_PATTERN = re.compile(
     rf"[［【]\s*(?P<label>[^］】\n]{{1,60}}?🔗)\s*[］】]\s*(?P<url>{TRACKER_URL_BODY})"
 )
@@ -5316,11 +5347,7 @@ def tracker_display_markdown(text: str, auto_sentence_breaks: bool = False) -> s
     raw = TRACKER_BRACKETED_LINK_PATTERN.sub(format_named_url, raw)
     raw = TRACKER_NAMED_LINK_PATTERN.sub(format_named_url, raw)
 
-    def format_url(match: re.Match) -> str:
-        url = match.group(0)
-        return f"[開啟連結]({url}){link_separator(match.end())}"
-
-    raw = TRACKER_PLAIN_URL_PATTERN.sub(format_url, raw)
+    raw = linkify_plain_http_urls(raw)
     if auto_sentence_breaks:
         raw = auto_break_chat_sentences(raw)
     return preserve_markdown_linebreaks(raw, linkify_links=False)
@@ -6064,7 +6091,50 @@ def render_tracker_conversation(messages: list[dict]):
             )
 
 
+@st.dialog("編輯客服回饋")
+def edit_pending_feedback_dialog(item: dict):
+    feedback_id = str(item["feedback_id"])
+    st.caption(f"回饋 ID：{feedback_id}")
+    with st.form(f"tracker_suggestion_form_{feedback_id}"):
+        suggestion = st.text_area(
+            "客服回饋",
+            value=str(item.get("suggestion") or ""),
+            height=260,
+            key=f"tracker_edit_suggestion_{feedback_id}_{item.get('updated_at')}",
+        )
+        submitted = st.form_submit_button("儲存回饋", type="primary", width="stretch")
+    if submitted:
+        if not suggestion.strip():
+            st.error("客服回饋不可空白。")
+            return
+        result = edit_feedback_tracker_suggestion(feedback_id, suggestion)
+        if result.get("status") == "success":
+            st.session_state["tracker_action_notice"] = "客服回饋已更新，原始內容仍保留。"
+            st.rerun()
+        st.error(f"儲存失敗：{result.get('message')}")
+
+
+@st.dialog("確認刪除回饋", dismissible=False)
+def confirm_delete_pending_feedback(item: dict):
+    feedback_id = str(item["feedback_id"])
+    st.warning("刪除後會從追蹤清單移除；原始回饋仍保留供追溯，重新拉取不會恢復此項目。")
+    st.caption(f"回饋 ID：{feedback_id}")
+    confirm_col, cancel_col = st.columns(2)
+    if confirm_col.button("確認刪除", type="primary", width="stretch", key=f"tracker_confirm_delete_{feedback_id}"):
+        result = delete_feedback_tracker_item(feedback_id)
+        if result.get("status") == "success":
+            st.session_state["tracker_clear_selected_feedback_after_save"] = True
+            st.session_state["tracker_action_notice"] = "已從回饋追蹤清單移除。"
+            st.rerun()
+        st.error(f"刪除失敗：{result.get('message')}")
+    if cancel_col.button("取消", width="stretch", key=f"tracker_cancel_delete_{feedback_id}"):
+        st.rerun()
+
+
 def render_feedback_tracker_page():
+    action_notice = st.session_state.pop("tracker_action_notice", None)
+    if action_notice:
+        st.success(action_notice)
     tracker_notice = st.session_state.pop("tracker_sync_notice", None)
     if tracker_notice:
         result = tracker_notice.get("result") or {}
@@ -6205,7 +6275,22 @@ def render_feedback_tracker_page():
                         linkify_links=False,
                     )
                 )
-                st.markdown("**客服回饋**")
+                current_stage = tracker_stage(item)
+                feedback_title, edit_col, delete_col = st.columns([4, 1, 1])
+                feedback_title.markdown("**客服回饋**")
+                if current_stage == "pending_fix":
+                    if edit_col.button(
+                        "編輯", icon=":material/edit:",
+                        key=f"tracker_edit_{selected_feedback_id}",
+                        width="stretch",
+                    ):
+                        edit_pending_feedback_dialog(item)
+                    if delete_col.button(
+                        "刪除", icon=":material/delete:",
+                        key=f"tracker_delete_{selected_feedback_id}",
+                        width="stretch",
+                    ):
+                        confirm_delete_pending_feedback(item)
                 st.markdown(
                     tracker_display_markdown(
                         (
@@ -6216,6 +6301,9 @@ def render_feedback_tracker_page():
                         auto_sentence_breaks=True,
                     )
                 )
+                if item.get("edited_suggestion"):
+                    with st.expander("查看原始客服回饋"):
+                        st.markdown(tracker_display_markdown(item.get("original_suggestion") or "-"))
                 st.caption(
                     f"類型：{item.get('feedback_type') or '-'} · "
                     f"目前路由：{item.get('decision_type') or '-'} · ID：{selected_feedback_id}"
@@ -6223,7 +6311,6 @@ def render_feedback_tracker_page():
                 render_feedback_before_after(item, regression_cases)
                 st.divider()
                 st.markdown("#### 客服驗收")
-                current_stage = tracker_stage(item)
                 original_review_note = str(item.get("review_note") or "")
                 if original_review_note:
                     st.caption("最近一次調整紀錄")

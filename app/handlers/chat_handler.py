@@ -426,6 +426,8 @@ RAG_SUMMARY_PROMPT = """
 - 不要以「RAG 內」、「根據知識庫」、「目前資料顯示」、「資料中查到」等來源說明開頭；直接回答結論。資訊不足時，不要說「目前查不到明確資訊」或「目前查不到明確線上申請方式」；改用客服語氣說「這部分需由客服依實際狀況確認」，並提供可行的下一步。
 - 回答中的內部縮寫必須轉為一般用語：CATV 改為「有線電視」、STB 改為「數位機上盒」、BB 改為「寬頻網路」。
 - 只使用資料內容，不要自行補充資料外的優惠、價格或承諾。
+- 使用者已明確選定服務或設備時，第一句直接承接該選擇並回答所問事項；不可再輸出泛用服務介紹、服務地區或「想了解哪一項」選單。
+- 除非使用者明確詢問客服電話或電話號碼，回覆不得主動列出電話。需要專人處理時只說明可由真人文字客服協助，不可要求使用者自行撥打。
 - 若資料已對使用者的問題提供直接結論，請先用一句話明確回答結論；不要在後面自行加入會推翻結論的「可能、未必、需再確認」說法。只有資料本身保留條件或不確定性時，才說明該條件。
 - 使用者詢問費用、金額、月繳／年繳差異時，只要資料中有數字，就必須把對應繳別與金額寫出來；不可只留下「費用如下」「銷售價格如下」等標題。若問同期間差多少，須用資料中的金額列式計算差額。
 - 使用者詢問申請、加購、購買、設定、排除或其他流程時，若資料有可操作步驟，必須先回答那些步驟；費用、產品介紹或一般說明不能取代處理流程。資料同時提供步驟與費用時，先列處理方式，再補充費用或條件。
@@ -1163,7 +1165,7 @@ def build_campaign_detail_context_query(
     if promotion_query_kind != "campaign_detail" or not allow_context:
         return query
 
-    campaign_topic = str((memory or {}).get("last_campaign_topic") or "").strip()
+    campaign_topic = stored_campaign_topic(memory)
     if not campaign_topic:
         return query
     if compact_text(campaign_topic).casefold() in compact_text(query).casefold():
@@ -1188,6 +1190,7 @@ def constrain_promotion_documents(
     promotion_scope: str | None,
     promotion_query_kind: str | None,
     social_discount_requested: bool = False,
+    memory: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
     """Enforce the LLM contract against retrieved document metadata."""
     if promotion_query_kind not in {"catalog", "campaign_detail"}:
@@ -1197,6 +1200,19 @@ def constrain_promotion_documents(
         doc for doc in docs
         if social_discount_requested or not is_social_discount_doc(doc)
     ]
+    if promotion_query_kind == "campaign_detail":
+        active_campaign = stored_campaign_topic(memory)
+        if active_campaign:
+            active_key = compact_text(active_campaign).casefold()
+            campaign_docs = [
+                doc
+                for doc in scoped_docs
+                if compact_text(campaign_doc_field(doc, "campaign_name")).casefold()
+                == active_key
+            ]
+            if campaign_docs:
+                return campaign_docs
+        return scoped_docs
     if promotion_query_kind != "catalog":
         return scoped_docs
     if promotion_scope == "pure_network":
@@ -1718,7 +1734,7 @@ def campaign_context_docs(
 ) -> tuple[str, List[Dict[str, Any]]]:
     """Return documents belonging to the dynamically remembered campaign."""
     memory = memory or {}
-    active_campaign = normalize_campaign_topic(str(memory.get("last_campaign_topic") or ""))
+    active_campaign = stored_campaign_topic(memory)
     candidates = [*docs, *(memory.get("last_knowledge_results") or [])]
     if active_campaign:
         active_key = compact_text(active_campaign).casefold()
@@ -1737,6 +1753,69 @@ def campaign_context_docs(
     if len(names) == 1:
         return next(iter(names)), docs
     return "", docs
+
+
+def build_campaign_rate_followup_reply(
+    user_text: str,
+    docs: List[Dict[str, Any]],
+    memory: Dict[str, Any] | None = None,
+) -> str:
+    """Render a requested speed/payment row from the selected campaign evidence."""
+    speed_match = re.search(
+        r"\d+(?:\.\d+)?\s*(?:gbps|g|mbps|m)\s*/\s*"
+        r"\d+(?:\.\d+)?\s*(?:gbps|g|mbps|m)",
+        str(user_text or ""),
+        flags=re.IGNORECASE,
+    )
+    if not speed_match:
+        return ""
+
+    campaign_name, campaign_docs = campaign_context_docs(docs, memory)
+    if not campaign_name:
+        return ""
+
+    requested_speed = re.sub(r"\s+", "", speed_match.group(0)).upper()
+    rate_lines: List[str] = []
+    for doc in campaign_docs:
+        rate_lines.extend(compact_campaign_rate_lines(doc, max_items=20))
+    selected_line = next(
+        (
+            line
+            for line in dict.fromkeys(rate_lines)
+            if re.sub(r"\s+", "", re.split(r"[\uff1a:]", line, maxsplit=1)[0]).upper()
+            == requested_speed
+        ),
+        "",
+    )
+    if not selected_line:
+        return ""
+
+    query = str(user_text or "")
+    requested_cycles = [label for label in PAYMENT_CYCLE_LABELS if label in query]
+    if any(term in query for term in ("每月", "一個月", "月費", "月租")):
+        requested_cycles.append("月繳")
+    if any(term in query for term in ("每年", "一年", "年費")):
+        requested_cycles.append("年繳")
+    requested_cycles = list(dict.fromkeys(requested_cycles))
+
+    if requested_cycles:
+        amounts = {
+            label: int(amount.replace(",", ""))
+            for label, amount in re.findall(
+                r"(月繳|季繳|半年繳|年繳)\s*([\d,]+)\s*元",
+                selected_line,
+            )
+        }
+        selected_prices = [
+            f"{label} {amounts[label]:,} 元"
+            for label in requested_cycles
+            if label in amounts
+        ]
+        if not selected_prices:
+            return ""
+        selected_line = f"{requested_speed}：" + "、".join(selected_prices)
+
+    return f"{campaign_name}\n{selected_line}"
 
 
 def build_campaign_contract_followup_reply(
@@ -1875,7 +1954,8 @@ def has_compact_promotion_reply(
 ) -> bool:
     """Identify promotion turns that have a complete source-backed short format."""
     return bool(
-        build_campaign_total_fee_reply(user_text, docs, memory=memory)
+        build_campaign_rate_followup_reply(user_text, docs, memory=memory)
+        or build_campaign_total_fee_reply(user_text, docs, memory=memory)
         or build_campaign_valid_period_reply(user_text, docs)
         or build_promotion_catalog_reply(
             user_text,
@@ -1934,9 +2014,7 @@ def build_campaign_total_fee_reply(
         return ""
 
     speed = speed_match.group(1)
-    active_campaign = normalize_campaign_topic(
-        str((memory or {}).get("last_campaign_topic") or "")
-    )
+    active_campaign = stored_campaign_topic(memory)
     candidate_docs = list(docs)
     if active_campaign:
         active_key = compact_text(active_campaign).casefold()
@@ -2508,6 +2586,41 @@ def remember_tv_reactivation_status(memory: Dict[str, Any], tool_result: Dict[st
     return memory
 
 
+def remember_internet_reactivation_status(
+    memory: Dict[str, Any],
+    tool_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Keep the trusted account-side outcome for the next customer turn."""
+    known = memory.setdefault("known_info", {})
+    data = tool_result.get("data") or {}
+    raw = data.get("raw") if isinstance(data, dict) else {}
+    raw = raw if isinstance(raw, dict) else {}
+    message = str(tool_result.get("message") or "").strip()
+    raw_message = str(raw.get("msg") or raw.get("api_msg") or "").strip()
+    combined = f"{message} {raw_message}".strip()
+
+    known.pop("internet_reactivation_status", None)
+    known.pop("internet_reactivation_message", None)
+    if (
+        tool_result.get("success")
+        and "網路服務狀態正常" in combined
+        and ("無需進行復線" in combined or "無需復線" in combined)
+    ):
+        # This result confirms only that an account-side reactivation is not
+        # required. It does not prove that the customer's connection works.
+        known["internet_reactivation_status"] = "not_required"
+        known["internet_reactivation_message"] = message or raw_message
+    elif tool_result.get("success") and any(
+        phrase in combined
+        for phrase in ("復線成功", "申請復線成功", "復線申請已受理")
+    ):
+        known["internet_reactivation_status"] = "requested"
+        known["internet_reactivation_message"] = message or raw_message
+
+    memory["known_info"] = known
+    return memory
+
+
 def build_repair_ticket_flow_disabled_reply(memory: Dict[str, Any]) -> str:
     profile = get_company_profile((memory or {}).get("company_code", DEFAULT_TV_CABLE))
     repair_link = build_company_link(profile, "維修申告")
@@ -2523,6 +2636,72 @@ def build_repair_ticket_flow_disabled_reply(memory: Dict[str, Any]) -> str:
             "送出需求，我們將安排專人與您聯繫協助處理，謝謝。"
         )
     return f"{low_speed_context}您好，為更完整了解您的需求，建議轉由真人客服協助確認及安排，謝謝。"
+
+
+def add_repair_form_to_handoff_offer(reply: str, memory: Dict[str, Any]) -> str:
+    """Add the configured self-service repair option before handoff consent."""
+    value = str(reply or "").strip()
+    if "維修申告" in value:
+        return value
+
+    profile = get_company_profile((memory or {}).get("company_code", DEFAULT_TV_CABLE))
+    repair_link = build_company_link(profile, "維修申告")
+    if not repair_link:
+        return value
+
+    form_line = f"您也可以填寫 {repair_link} 送出維修需求。"
+    question_marker = "請問是否需要"
+    question_index = value.find(question_marker)
+    if question_index >= 0:
+        lead = value[:question_index].rstrip()
+        question = value[question_index:].lstrip()
+        return "\n".join(part for part in (lead, form_line, question) if part)
+    return "\n".join(part for part in (value, form_line) if part)
+
+
+def is_repair_escalation_active(memory: Dict[str, Any]) -> bool:
+    """Return whether troubleshooting has already reached repair escalation."""
+    known = (memory or {}).get("known_info") or {}
+    return (
+        known.get("repair_ready") == "yes"
+        or (
+            known.get("troubleshooting_failed") == "yes"
+            and (
+                known.get("repair_followup_active") == "yes"
+                or ((memory or {}).get("clarify_context") or {}).get("type")
+                == "human_handoff_offer"
+            )
+        )
+    )
+
+
+def build_repeat_repair_escalation_router(memory: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep a repeated fault in the already-offered escalation stage."""
+    profile = get_company_profile((memory or {}).get("company_code", DEFAULT_TV_CABLE))
+    repair_link = build_company_link(profile, "維修申告")
+    if repair_link:
+        reply = (
+            f"您的問題需進一步協助處理，請填寫申告維修單：{repair_link}，或選擇轉真人服務。\n"
+            "請問是否需要幫您轉接真人文字客服？"
+        )
+    else:
+        reply = (
+            "您的問題需進一步協助處理，目前可選擇轉真人服務。\n"
+            "請問是否需要幫您轉接真人文字客服？"
+        )
+    return {
+        "route": "clarify",
+        "intent": "human_handoff_offer",
+        "tool_name": None,
+        "topic": "故障後續處理",
+        "should_cancel_current_flow": False,
+        "should_call_tool": False,
+        "should_retrieve_knowledge": False,
+        "knowledge_query": None,
+        "reply": reply,
+        "extracted_slots": {},
+        "reason": "repair_escalation_already_offered_same_issue",
+    }
 
 
 def build_install_application_reply(memory: Dict[str, Any]) -> str:
@@ -2615,6 +2794,18 @@ def attach_llm_latency(latency: Dict[str, Any], trace_token) -> Dict[str, Any]:
         sum(float(event.get("duration_sec", 0.0)) for event in events),
         3,
     )
+    token_fields = {
+        "input_tokens": "llm_input_tokens",
+        "output_tokens": "llm_output_tokens",
+        "total_tokens": "llm_total_tokens",
+        "cached_input_tokens": "llm_cached_input_tokens",
+    }
+    for event_key, latency_key in token_fields.items():
+        if any(event_key in event for event in events):
+            latency[latency_key] = sum(
+                int(event.get(event_key, 0) or 0)
+                for event in events
+            )
     latency["llm_events"] = events
     return latency
 
@@ -2727,12 +2918,17 @@ CUSTOMER_REPLY_PLAIN_FIELD_LABEL_RE = re.compile(
 CUSTOMER_REPLY_CHINESE_ITEM_RE = re.compile(r"(?<!\n)([一二三四五六七八九十]+[、])")
 CUSTOMER_REPLY_NUMBERED_ITEM_RE = re.compile(r"(?<![\n$＄,\d])(\d+[、])")
 CUSTOMER_REPLY_DOTTED_ITEM_RE = re.compile(r"(?<![\n$＄,\d])(\d+\.)[ \t　]+(?=\S)")
+CUSTOMER_REPLY_DOTTED_LINE_ITEM_RE = re.compile(
+    r"^([ \t　]*\d+\.)[ \t　]*(?=\S)",
+    re.MULTILINE,
+)
 CUSTOMER_REPLY_ORPHAN_FEE_HEADER_RE = re.compile(
     r"^\s*(?:(?:\d+[.)]\s*)?第|第\s*\d+[.)]\s*第)\s*[：:]?\s*$"
 )
 CUSTOMER_REPLY_ORPHAN_NUMBER_RE = re.compile(r"^\s*\d+[.)]\s*$")
+CUSTOMER_REPLY_ORPHAN_LIST_MARKER_RE = re.compile(r"^\s*[-*+]\s*$")
 CUSTOMER_REPLY_FEE_RULE_NUMBER_RE = re.compile(
-    r"^(\d+[.)]\s+)(?=(?:第\s*)?\d|第\s*[一二三四五六七八九十]|分機|若|如|已|第\s*6)"
+    r"^(\d+[.)]\s+)(?=(?:第\s*)?\d|第\s*[一二三四五六七八九十]|分機|若|如|第\s*6)"
 )
 
 
@@ -2741,6 +2937,9 @@ def format_customer_reply_text(text: str) -> str:
     if not value:
         return ""
 
+    # Keep model-generated ordered lists valid Markdown even when the model
+    # omits the space after a line-leading marker, for example ``3.option``.
+    value = CUSTOMER_REPLY_DOTTED_LINE_ITEM_RE.sub(r"\1 ", value)
     value = re.sub(r"([$＄])\s*\n\s*(?=\d)", r"\1", value)
     value = re.sub(r"(?<=\d),\s*\n\s*(?=\d{3}(?:\D|$))", ",", value)
     value = re.sub(r"([$＄]?\s*)(\d{1,2}),(\d)(\d{3})(?=\D|$)", r"\1\2\3,\4", value)
@@ -2795,6 +2994,7 @@ def format_customer_reply_text(text: str) -> str:
             not line
             or CUSTOMER_REPLY_ORPHAN_FEE_HEADER_RE.match(line)
             or CUSTOMER_REPLY_ORPHAN_NUMBER_RE.match(line)
+            or CUSTOMER_REPLY_ORPHAN_LIST_MARKER_RE.match(line)
         ):
             continue
         # A summary may flatten several prize rows into one line. When a line
@@ -2842,7 +3042,7 @@ def finalize_customer_reply(user_text: str, reply: str) -> str:
     value = sanitize_human_handoff_keyword_instruction(value)
     if is_fee_reply_formatting_context(user_text, value):
         value = format_customer_reply_text(value)
-    return sanitize_customer_facing_jargon(value)
+    return value
 
 
 def _has_link_for_label(text: str, label: str, url: str) -> bool:
@@ -3482,6 +3682,16 @@ def compose_knowledge_reply(
 
     guard_query = answer_guard_query or user_text
     docs = apply_knowledge_doc_visibility_policies(user_text, docs)
+
+    if promotion_query_kind == "campaign_detail" and stored_campaign_topic(memory):
+        campaign_rate_reply = build_campaign_rate_followup_reply(
+            user_text,
+            docs,
+            memory=memory,
+        )
+        if campaign_rate_reply:
+            return campaign_rate_reply
+
     answerable_docs = filter_answerable_docs(guard_query, docs)
 
     fixed_ip_reply = build_fixed_ip_binding_knowledge_fallback(
@@ -4107,6 +4317,16 @@ def normalize_campaign_topic(value: str) -> str:
     return topic
 
 
+def stored_campaign_topic(memory: Dict[str, Any] | None) -> str:
+    memory = memory or {}
+    known = memory.get("known_info") if isinstance(memory.get("known_info"), dict) else {}
+    return normalize_campaign_topic(str(
+        memory.get("last_campaign_topic")
+        or known.get("last_campaign_topic")
+        or ""
+    ))
+
+
 def campaign_name_from_doc(doc: Dict[str, Any]) -> str | None:
     if not isinstance(doc, dict):
         return None
@@ -4118,7 +4338,7 @@ def campaign_name_from_doc(doc: Dict[str, Any]) -> str | None:
 
 
 def infer_recent_campaign_topic(memory: Dict[str, Any], history: List[Dict[str, str]]) -> str | None:
-    remembered_topic = normalize_campaign_topic(str(memory.get("last_campaign_topic") or ""))
+    remembered_topic = stored_campaign_topic(memory)
     if remembered_topic:
         return remembered_topic
 
@@ -4140,6 +4360,7 @@ def remember_campaign_topic(
     explicit_campaign, _ = find_named_campaign_docs(query, docs or [])
     if explicit_campaign:
         memory["last_campaign_topic"] = explicit_campaign
+        memory.setdefault("known_info", {})["last_campaign_topic"] = explicit_campaign
         return memory
 
     doc_campaigns = {
@@ -4148,10 +4369,13 @@ def remember_campaign_topic(
         if (campaign_name := campaign_name_from_doc(doc))
     }
     if len(doc_campaigns) == 1:
-        memory["last_campaign_topic"] = next(iter(doc_campaigns))
+        campaign_topic = next(iter(doc_campaigns))
+        memory["last_campaign_topic"] = campaign_topic
+        memory.setdefault("known_info", {})["last_campaign_topic"] = campaign_topic
         return memory
     if len(doc_campaigns) > 1:
         memory.pop("last_campaign_topic", None)
+        memory.setdefault("known_info", {}).pop("last_campaign_topic", None)
         return memory
 
     return memory
@@ -4409,6 +4633,9 @@ def clear_current_flow(memory: Dict[str, Any]) -> Dict[str, Any]:
         "modem_light_status",
         "repair_flow_status",
         "repair_followup_active",
+        "termination_service_scope",
+        "human_handoff_active",
+        "human_handoff_topic",
     ]:
         known.pop(key, None)
 
@@ -4433,6 +4660,7 @@ def clear_intent_context(memory: Dict[str, Any]) -> Dict[str, Any]:
 
     known = memory.setdefault("known_info", {})
     known.pop("last_value_added_topic", None)
+    known.pop("last_campaign_topic", None)
     known.pop("disabled_tool", None)
     known.pop(IDENTITY_LOOKUP_FAILURE_COUNT_KEY, None)
     known.pop(IDENTITY_LOOKUP_FAILURE_TOOL_KEY, None)
@@ -4441,10 +4669,63 @@ def clear_intent_context(memory: Dict[str, Any]) -> Dict[str, Any]:
     return memory
 
 
+def render_clarification_reply(question: str, options: Any) -> str | None:
+    question = str(question or "").strip()
+    if not question:
+        return None
+
+    raw_options = list(options) if isinstance(options, dict) else options
+    if not isinstance(raw_options, list):
+        return None
+
+    cleaned_options = []
+    for option in raw_options:
+        value = re.sub(
+            r"^\s*(?:\d+[.)、]|[-*])\s*",
+            "",
+            str(option or ""),
+        ).strip()
+        if value:
+            cleaned_options.append(value)
+    if len(cleaned_options) < 2:
+        return None
+
+    return "\n".join([
+        question,
+        *(f"{index}. {option}" for index, option in enumerate(cleaned_options, start=1)),
+    ])
+
+
+def select_clarification_reply(
+    router: Dict[str, Any],
+    fallback_reply: str,
+    clarify_context: Dict[str, Any] | None = None,
+) -> str:
+    if router.get("route") != "clarify":
+        return fallback_reply
+
+    structured_reply = render_clarification_reply(
+        str(router.get("clarification_question") or ""),
+        router.get("clarification_options") or [],
+    )
+    if structured_reply:
+        return structured_reply
+
+    context = clarify_context or build_clarify_context(router)
+    context_reply = render_clarification_reply(
+        str((context or {}).get("prompt") or ""),
+        (context or {}).get("options") or [],
+    )
+    return context_reply or fallback_reply
+
+
 def build_plan_from_router(router: Dict[str, Any]) -> Dict[str, Any]:
     route = router.get("route")
     intent = router.get("intent", "other")
     reply = router.get("reply") or "請問您想查詢資料、辦理服務，還是回報故障呢？"
+
+    if route == "clarify":
+        reply = select_clarification_reply(router, reply)
     if intent == "invoice_carrier_binding_confirmation":
         reply = INVOICE_CARRIER_BINDING_CONFIRMATION_REPLY
     elif intent == "tv_password_prompt":
@@ -4507,6 +4788,30 @@ def build_clarify_context(router: Dict[str, Any], original_query: str = "") -> D
     topic = router.get("topic")
     intent = router.get("intent")
 
+    if intent == "human_handoff_offer":
+        return {
+            "type": "human_handoff_offer",
+            "topic": topic or "真人客服轉接確認",
+            "original_query": original_query,
+            "prompt": router.get("reply") or "請問是否需要幫您轉接真人文字客服？",
+            "options": {
+                "需要轉接真人客服": {
+                    "option_id": "human_handoff_offer_accept",
+                    "route": "direct_reply",
+                    "intent": "human_handoff_request",
+                    "topic": topic or "真人客服",
+                    "reply": WEB_HUMAN_HANDOFF_REPLY,
+                },
+                "暫時不需要": {
+                    "option_id": "human_handoff_offer_decline",
+                    "route": "direct_reply",
+                    "intent": "human_handoff_declined",
+                    "topic": topic or "真人客服",
+                    "reply": "好的，我先不轉真人客服。您可以繼續詢問其他問題。",
+                },
+            },
+        }
+
     if intent in {"human_handoff_confirmation", "human_handoff_triage"}:
         return {
             "type": "human_handoff_triage",
@@ -4520,13 +4825,65 @@ def build_clarify_context(router: Dict[str, Any], original_query: str = "") -> D
         return context
 
     if intent == "service_termination_service_clarify":
-        # The first turn was classified by the LLM.  Keep only that scoped
-        # selection state so the following answer cannot be polluted by a
-        # generic, mismatched equipment article.
+        # The LLM owns the semantic selection.  The backend only validates
+        # the returned option ID and supplies the scoped route/query, so a
+        # terse service name cannot fall back to a generic service menu.
         return {
             "type": "llm_termination_service_selection",
             "topic": "退租服務類型",
             "original_query": original_query,
+            "options": {
+                "有線電視": {
+                    "option_id": "termination_cable_tv",
+                    "accepted_intents": [
+                        "cable_tv_termination_guidance",
+                        "cable_tv_termination_equipment_return",
+                        "cable_tv_termination_equipment_guidance",
+                    ],
+                    "route": "direct_reply",
+                    "intent": "cable_tv_termination_guidance",
+                    "topic": "有線電視退租",
+                    "requested_information": "有線電視退租時須歸還的設備、配件與辦理流程",
+                    "context_state": {"termination_service_scope": "cable_tv"},
+                    "reply": (
+                        "了解，您要辦理有線電視退租。一般需歸還機上盒及實際租借的配件；"
+                        "合約、可能費用、證件與完整歸還項目仍需由客服依帳戶確認。"
+                    ),
+                },
+                "寬頻網路": {
+                    "option_id": "termination_broadband",
+                    "accepted_intents": [
+                        "broadband_termination_guidance",
+                        "internet_service_termination_guidance",
+                        "broadband_termination_equipment_return",
+                    ],
+                    "route": "direct_reply",
+                    "intent": "broadband_termination_guidance",
+                    "topic": "寬頻網路退租",
+                    "context_state": {"termination_service_scope": "broadband"},
+                    "reply": (
+                        "了解，您要辦理寬頻網路退租。實際合約、可能費用與應歸還設備"
+                        "需由客服依帳戶確認；一般需歸還數據機及實際租借的配件。"
+                    ),
+                },
+                "兩項服務": {
+                    "option_id": "termination_both_services",
+                    "accepted_intents": [
+                        "service_termination_equipment_guidance",
+                        "combined_service_termination_guidance",
+                    ],
+                    "route": "direct_reply",
+                    "intent": "service_termination_equipment_guidance",
+                    "topic": "有線電視與寬頻網路退租",
+                    "context_state": {"termination_service_scope": "both"},
+                    "reply": (
+                        "了解，您要退租有線電視與寬頻網路。"
+                        "有線電視一般需歸還機上盒及實際租借配件；"
+                        "寬頻網路一般需歸還數據機及實際租借配件。"
+                        "合約、可能費用與完整歸還項目仍需由客服依帳戶確認。"
+                    ),
+                },
+            },
         }
 
     if intent == "service_account_transfer_service_clarify":
@@ -4571,6 +4928,12 @@ def build_clarify_context(router: Dict[str, Any], original_query: str = "") -> D
             context["original_query"] = original_query
         return context
 
+    if intent == "contract_expired_plan_change_clarify":
+        context = get_clarify_context("方案轉換目標")
+        if context is not None and original_query:
+            context["original_query"] = original_query
+        return context
+
     if intent != "ambiguous_short_query":
         return None
 
@@ -4586,8 +4949,8 @@ def resolve_clarify_context(user_text: str, memory: Dict[str, Any]) -> Dict[str,
         return None
 
     if context.get("type") == "llm_termination_service_selection":
-        # Let the user's service choice be classified by the LLM.  The router
-        # consumes this limited context after that classification.
+        # The model receives the options in memory and returns selected_option_id.
+        # Route resolution remains in resolve_model_selected_context().
         return None
 
     if context.get("type") == "service_account_transfer_service_selection":
@@ -4746,23 +5109,35 @@ def resolve_model_selected_context(
 ) -> tuple[Dict[str, Any], bool]:
     """Validate an LLM-selected clarify option against conversation state.
 
-    The model interprets the customer's wording and returns only an option ID.
-    This function never guesses from the message text; it accepts an ID only
-    when it exists in the exact option set previously shown to the customer.
-    Route, tool, reply and source-document fields come from the validated
-    option rather than from model-supplied identifiers.
+    The model interprets the customer's wording and normally returns an option
+    ID. If it omits that field, an exact model-intent alias may identify one
+    and only one option. This function never guesses from customer text.
+    Route, tool, reply and source-document fields always come from the
+    validated option rather than from model-supplied identifiers.
     """
     context = memory.get("clarify_context")
     if not isinstance(context, dict):
         return router, False
 
-    selected_option_id = str(router.get("selected_option_id") or "").strip()
-    if not selected_option_id:
-        return router, False
-
     options = context.get("options")
     if not isinstance(options, dict):
         return router, False
+
+    selected_option_id = str(router.get("selected_option_id") or "").strip()
+    if not selected_option_id:
+        model_intent = str(router.get("intent") or "").strip()
+        intent_matches = [
+            raw_option
+            for raw_option in options.values()
+            if isinstance(raw_option, dict)
+            and model_intent
+            and model_intent in set(raw_option.get("accepted_intents") or [])
+        ]
+        if len(intent_matches) != 1:
+            return router, False
+        selected_option_id = str(intent_matches[0].get("option_id") or "").strip()
+        if not selected_option_id:
+            return router, False
 
     selected_name = ""
     selected: Dict[str, Any] | None = None
@@ -4796,6 +5171,24 @@ def resolve_model_selected_context(
     selected_route = str(selected.get("route") or "clarify")
     is_knowledge = selected_route == "knowledge_query"
     is_tool = selected_route == "tool_action"
+    context_state = selected.get("context_state")
+    if isinstance(context_state, dict):
+        termination_scope = str(context_state.get("termination_service_scope") or "").strip()
+        if termination_scope in {"cable_tv", "broadband", "both"}:
+            memory.setdefault("known_info", {})["termination_service_scope"] = termination_scope
+    if (
+        selected.get("entity_type") == "knowledge_document"
+        and selected.get("intent") == "promotion_named_campaign_selection"
+        and str(selected.get("topic") or selected_name).strip()
+    ):
+        # The name comes from the validated dynamic catalog option, not from
+        # a model-invented campaign. Preserve it for later speed/price turns.
+        memory["last_campaign_topic"] = str(
+            selected.get("topic") or selected_name
+        ).strip()
+        memory.setdefault("known_info", {})["last_campaign_topic"] = memory[
+            "last_campaign_topic"
+        ]
     validated = dict(router)
     validated.update({
         "route": selected_route,
@@ -5176,14 +5569,16 @@ def build_memory_without_active_flow(memory: Dict[str, Any]) -> Dict[str, Any]:
     candidate["clarify_context"] = None
     candidate["_active_flow_switch_check"] = True
 
+    repair_escalation_active = is_repair_escalation_active(memory)
     known = dict(candidate.get("known_info", {}) or {})
     if known.get("troubleshooting_started") == "yes":
         known["_previous_troubleshooting_started"] = "yes"
     known["troubleshooting_started"] = "no"
     known["troubleshooting_step"] = None
-    known["troubleshooting_type"] = None
-    known["troubleshooting_failed"] = "no"
-    known["repair_ready"] = "no"
+    if not repair_escalation_active:
+        known["troubleshooting_type"] = None
+        known["troubleshooting_failed"] = "no"
+        known["repair_ready"] = "no"
     candidate["known_info"] = known
     return candidate
 
@@ -5355,6 +5750,11 @@ def detect_active_flow_switch(
     llm,
     latency: Dict[str, Any],
 ) -> Dict[str, Any] | None:
+    # Punctuation alone carries no new service intent. Keep the active SOP so
+    # the troubleshooting engine can repeat or clarify its current step.
+    if not re.search(r"[A-Za-z0-9\u4e00-\u9fff]", str(user_text or "")):
+        return None
+
     candidate_memory = build_memory_without_active_flow(memory)
     t0 = time.perf_counter()
     router = run_intent_router(
@@ -5391,6 +5791,22 @@ def detect_active_flow_switch(
     ):
         router["should_cancel_current_flow"] = True
         router["reason"] = f"active_flow_switch_troubleshooting_{incoming_type}"
+        return router
+
+    if (
+        is_repair_escalation_active(memory)
+        and router.get("route") in {"continue_current_flow", "troubleshooting"}
+        and not router.get("should_cancel_current_flow")
+    ):
+        return build_repeat_repair_escalation_router(memory)
+
+    if (
+        router.get("intent") == "human_handoff_offer"
+        and active_type in {"tv", "network", "remote"}
+        and incoming_type == active_type
+    ):
+        router["should_cancel_current_flow"] = False
+        router["reason"] = "active_flow_troubleshooting_handoff_offer"
         return router
 
     # A fresh LLM decision of ``troubleshooting`` while the same SOP is active
@@ -5540,6 +5956,24 @@ def run_tool_or_rag_flow(
         should_call_tool = False
         tool_name = None
 
+    # Chat repair requests must never execute a repair-ticket tool directly.
+    # The main flow first troubleshoots and then obtains handoff consent; this
+    # final action gate also protects legacy pending state and stale plans.
+    if tool_name == "create_repair_ticket":
+        should_call_tool = False
+        tool_name = None
+        known = memory.get("known_info", {})
+        if (
+            known.get("troubleshooting_failed") == "yes"
+            or known.get("repair_ready") == "yes"
+        ):
+            reply = add_repair_form_to_handoff_offer(
+                "排除後仍無法恢復，請問是否需要幫您轉接真人文字客服？",
+                memory,
+            )
+        else:
+            reply = "我先協助您進行基本排錯；若仍無法恢復，再詢問您是否轉接真人文字客服。"
+
     if router.get("route") == "company_info":
         info_topic = router.get("topic") or plan.get("knowledge_query") or "company_overview"
         reply = build_company_info_reply(
@@ -5590,6 +6024,7 @@ def run_tool_or_rag_flow(
                 router.get("promotion_scope"),
                 router.get("promotion_query_kind"),
                 bool(router.get("social_discount_requested")),
+                memory=memory,
             )
             latency["rag_scoped_docs"] = len(docs)
             latency["rag"] = time.perf_counter() - t0
@@ -5648,14 +6083,20 @@ def run_tool_or_rag_flow(
                     docs=answerable_docs,
                     query=answer_guard_query,
                 )
-                catalog_context = build_promotion_catalog_clarify_context(
-                    user_text,
-                    answerable_docs,
-                    intent=rag_plan.get("intent"),
-                    promotion_scope=router.get("promotion_scope"),
+                catalog_context = (
+                    build_promotion_catalog_clarify_context(
+                        user_text,
+                        answerable_docs,
+                        intent=rag_plan.get("intent"),
+                        promotion_scope=router.get("promotion_scope"),
+                    )
+                    if router.get("promotion_query_kind") == "catalog"
+                    else None
                 )
                 if catalog_context:
                     memory["clarify_context"] = catalog_context
+                elif router.get("promotion_query_kind") == "campaign_detail":
+                    memory["clarify_context"] = None
 
     elif (
         should_call_tool
@@ -5760,6 +6201,8 @@ def run_tool_or_rag_flow(
                 memory["pending_tool_missing_repeat_count"] = 0
                 if tool_name == "search_bill":
                     memory = remember_bill_query_status(memory, tool_result)
+                if tool_name == "bill_return_line_internet":
+                    memory = remember_internet_reactivation_status(memory, tool_result)
                 if tool_name == "bill_return_line_tv":
                     memory = remember_tv_reactivation_status(memory, tool_result)
 
@@ -5816,7 +6259,7 @@ def run_tool_or_rag_flow(
         has_active_campaign_detail = bool(
             plan.get("promotion_query_kind") == "campaign_detail"
             and not router.get("should_cancel_current_flow")
-            and memory.get("last_campaign_topic")
+            and stored_campaign_topic(memory)
         )
         preserve_exact_knowledge_query = (
             has_validated_knowledge_target
@@ -5861,6 +6304,7 @@ def run_tool_or_rag_flow(
             plan.get("promotion_scope"),
             plan.get("promotion_query_kind"),
             bool(plan.get("social_discount_requested")),
+            memory=memory,
         )
         docs = carry_forward_same_intent_evidence(
             docs,
@@ -5957,14 +6401,20 @@ def run_tool_or_rag_flow(
             docs=memory["last_knowledge_results"],
             query=answer_guard_query,
         )
-        catalog_context = build_promotion_catalog_clarify_context(
-            user_text,
-            memory["last_knowledge_results"],
-            intent=plan.get("intent"),
-            promotion_scope=plan.get("promotion_scope"),
+        catalog_context = (
+            build_promotion_catalog_clarify_context(
+                user_text,
+                memory["last_knowledge_results"],
+                intent=plan.get("intent"),
+                promotion_scope=plan.get("promotion_scope"),
+            )
+            if plan.get("promotion_query_kind") == "catalog"
+            else None
         )
         if catalog_context:
             memory["clarify_context"] = catalog_context
+        elif plan.get("promotion_query_kind") == "campaign_detail":
+            memory["clarify_context"] = None
 
     else:
         memory["last_knowledge_results"] = []
@@ -6013,6 +6463,7 @@ def handle_chat_message(
     is_troubleshooting = (
         known.get("troubleshooting_started") == "yes"
         or known.get("repair_followup_active") == "yes"
+        or is_repair_escalation_active(memory)
     )
     active_flow_router = None
     if is_troubleshooting or (
@@ -6102,7 +6553,8 @@ def handle_chat_message(
             plan = build_plan_from_router(router)
         else:
             plan = build_troubleshooting_plan(memory)
-        plan = apply_troubleshooting_engine(user_text, memory, plan, llm=llm)
+        if plan.get("intent") != "human_handoff_offer":
+            plan = apply_troubleshooting_engine(user_text, memory, plan, llm=llm)
 
     else:
         # A non-slot message while a tool is waiting for identity data is a
@@ -6131,6 +6583,16 @@ def handle_chat_message(
         )
         if validated_context_selection:
             memory["clarify_context"] = None
+
+        # A campaign-detail route is the model's semantic confirmation that
+        # this turn continues the validated dynamic campaign. Do not let a
+        # contradictory cancellation flag strip that trusted retrieval scope.
+        if (
+            router.get("route") == "knowledge_query"
+            and router.get("promotion_query_kind") == "campaign_detail"
+            and stored_campaign_topic(memory)
+        ):
+            router["should_cancel_current_flow"] = False
 
         # 如果正在 pending tool，但使用者明顯換話題，取消原本 pending tool
         if should_cancel_pending_tool(user_text, router, memory):
@@ -6179,6 +6641,76 @@ def handle_chat_message(
                 memory,
                 plan,
             )
+
+    if (
+        (plan.get("tool_name") == "create_repair_ticket" and plan.get("should_call_tool") is True)
+        or (
+            router.get("tool_name") == "create_repair_ticket"
+            and router.get("should_call_tool") is True
+        )
+    ):
+        memory = clear_pending_tool(memory)
+        pending_tool = None
+        in_pending_mode = False
+        known = memory.setdefault("known_info", {})
+        if (
+            known.get("troubleshooting_failed") == "yes"
+            or known.get("repair_ready") == "yes"
+        ):
+            router = {
+                "route": "clarify",
+                "intent": "human_handoff_offer",
+                "tool_name": None,
+                "topic": "故障處理",
+                "should_cancel_current_flow": False,
+                "should_call_tool": False,
+                "should_retrieve_knowledge": False,
+                "knowledge_query": None,
+                "reply": "排除後仍無法恢復，請問是否需要幫您轉接真人文字客服？",
+                "extracted_slots": {},
+                "reason": "repair_action_safety_requires_handoff_confirmation",
+            }
+            plan = build_plan_from_router(router)
+        else:
+            router = {
+                "route": "troubleshooting",
+                "intent": "repair_troubleshooting_intake",
+                "tool_name": None,
+                "topic": "故障排除",
+                "should_cancel_current_flow": False,
+                "should_call_tool": False,
+                "should_retrieve_knowledge": False,
+                "knowledge_query": None,
+                "reply": "",
+                "extracted_slots": {},
+                "reason": "repair_action_safety_requires_troubleshooting",
+            }
+            plan = apply_troubleshooting_engine(
+                user_text,
+                memory,
+                build_plan_from_router(router),
+                llm=llm,
+            )
+
+    if plan.get("intent") == "human_handoff_offer":
+        known = memory.get("known_info", {})
+        if (
+            known.get("troubleshooting_failed") == "yes"
+            or known.get("repair_ready") == "yes"
+            or known.get("troubleshooting_started") == "yes"
+        ):
+            known["troubleshooting_started"] = "no"
+            known["troubleshooting_failed"] = "yes"
+            known["repair_ready"] = "yes"
+            memory["known_info"] = known
+            plan["reply"] = add_repair_form_to_handoff_offer(
+                str(plan.get("reply") or ""),
+                memory,
+            )
+        memory["clarify_context"] = build_clarify_context(
+            plan,
+            original_query=user_text,
+        )
 
     # An explicit unpaid statement can never authorize a reactivation API.
     # Keep this as an action-safety invariant after the LLM has interpreted

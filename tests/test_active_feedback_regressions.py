@@ -22,7 +22,6 @@ from app.handlers.chat_handler import (
     is_unpaid_partial_payment_question,
     is_unpaid_reactivation_request,
 )
-from app.services.router_prompt import build_intent_router_rules
 from app.services.troubleshooting_engine import apply_troubleshooting_engine
 from app.services.troubleshooting_engine import record_declared_speed_gap
 from app.services.slot_manager import (
@@ -36,19 +35,6 @@ from app.services.company_profile import build_company_info_reply
 
 
 class ActiveFeedbackRegressionTest(unittest.TestCase):
-    def test_router_prompt_contains_organizing_feedback_contracts(self):
-        rules = build_intent_router_rules()
-
-        self.assertIn("逾期未領將以掛號方式寄送", rules)
-        self.assertIn("安全碼末三碼及 3D 驗證", rules)
-        self.assertIn("APP「註冊登入 → 歷史帳單」", rules)
-        self.assertIn("官網與行動客服 APP 的登入資料分開", rules)
-        self.assertIn("固定 IP 申請數量 當期費用", rules)
-        self.assertIn("方案名稱與金額必須由當期知識文件取得", rules)
-        self.assertIn("家裡裝上網 100M 加電視頻道一個月多少", rules)
-        self.assertIn("不是已繳費復線", rules)
-        self.assertIn("發票歸戶到手機條碼載具", rules)
-
     def test_declared_speed_gap_survives_a_followup_with_only_measured_speed(self):
         known = {}
 
@@ -89,8 +75,10 @@ class ActiveFeedbackRegressionTest(unittest.TestCase):
         self.assertFalse(first["should_call_tool"])
         self.assertIn("300 Mbps", first["reply"])
         self.assertIn("30 Mbps", first["reply"])
-        self.assertTrue(second["should_call_tool"])
-        self.assertEqual(second["tool_name"], "create_repair_ticket")
+        self.assertFalse(second["should_call_tool"])
+        self.assertIsNone(second["tool_name"])
+        self.assertEqual(second["intent"], "human_handoff_offer")
+        self.assertIn("是否需要", second["reply"])
 
     def test_new_customer_number_replaces_prior_pending_value(self):
         memory = {
@@ -222,7 +210,7 @@ class ActiveFeedbackRegressionTest(unittest.TestCase):
             },
         )
 
-        self.assertIn("維持報修處理", result["reply"])
+        self.assertIn("轉接真人文字客服", result["reply"])
         self.assertIn("不需要再重複重新插電", result["reply"])
         self.assertFalse(result["should_call_tool"])
 
@@ -282,8 +270,10 @@ class ActiveFeedbackRegressionTest(unittest.TestCase):
             llm=llm,
         )
 
-        self.assertTrue(result["should_call_tool"])
-        self.assertEqual(result["tool_name"], "create_repair_ticket")
+        self.assertFalse(result["should_call_tool"])
+        self.assertIsNone(result["tool_name"])
+        self.assertEqual(result["intent"], "human_handoff_offer")
+        self.assertIn("是否需要", result["reply"])
         self.assertNotIn("電源是否有亮燈", result["reply"])
 
     def test_speed_gap_repair_followup_does_not_restart_retest(self):
@@ -533,9 +523,10 @@ class ActiveFeedbackRegressionTest(unittest.TestCase):
             {"reply": "", "should_call_tool": False, "tool_name": None},
         )
 
-        self.assertTrue(result["should_call_tool"])
-        self.assertEqual(result["tool_name"], "create_repair_ticket")
-        self.assertTrue(result["preserve_reply_when_tool_disabled"])
+        self.assertFalse(result["should_call_tool"])
+        self.assertIsNone(result["tool_name"])
+        self.assertEqual(result["intent"], "human_handoff_offer")
+        self.assertIn("是否需要", result["reply"])
         self.assertIn("請勿自行碰觸", result["reply"])
         self.assertNotIn("電源燈", result["reply"])
 
@@ -562,9 +553,10 @@ class ActiveFeedbackRegressionTest(unittest.TestCase):
             },
         )
 
-        self.assertTrue(result["should_call_tool"])
-        self.assertEqual(result["tool_name"], "create_repair_ticket")
-        self.assertTrue(result["preserve_reply_when_tool_disabled"])
+        self.assertFalse(result["should_call_tool"])
+        self.assertIsNone(result["tool_name"])
+        self.assertEqual(result["intent"], "human_handoff_offer")
+        self.assertIn("是否需要", result["reply"])
         self.assertIn("請勿自行碰觸", result["reply"])
         self.assertNotIn("請問您想查詢資料", result["reply"])
 
@@ -607,27 +599,6 @@ class ActiveFeedbackRegressionTest(unittest.TestCase):
         self.assertIn("雙模機且遙控器型號為 TOP-006", result["reply"])
         self.assertIn("雙模機且遙控器型號為 TOP-007", result["reply"])
 
-    def test_router_prompt_contains_current_feedback_semantics(self):
-        rules = build_intent_router_rules()
-
-        self.assertIn("intent = repair_visit_expectation", rules)
-        self.assertIn("intent = human_handoff_request", rules)
-        self.assertIn("不可提供客服電話", rules)
-        self.assertIn("intent = relocation_guidance", rules)
-        self.assertIn("移機 搬家 換地址 流程 費用 條件", rules)
-        self.assertIn("intent = remote_power_learning", rules)
-        self.assertIn("intent = points_account_merge_policy", rules)
-        self.assertIn("intent = cable_tv_payment_cycle_comparison", rules)
-        self.assertIn("intent = fixed_ip_binding_guidance", rules)
-        self.assertIn("intent = tv_picture_quality_issue", rules)
-        self.assertIn("單獨「訊號很差」仍須", rules)
-        self.assertIn("intent = external_line_loose_repair_request", rules)
-        self.assertIn("停止繳納續期費用", rules)
-        self.assertIn("安心使用至當期最後一天", rules)
-        self.assertIn("https://www.tinp.net.tw/", rules)
-        self.assertIn("https://www.speedtest.net/", rules)
-        self.assertIn("機上盒本身沒有安全模式功能", rules)
-
     def test_repeated_outage_does_not_imply_modem_reboot_was_completed(self):
         memory = {
             "known_info": {
@@ -668,8 +639,10 @@ class ActiveFeedbackRegressionTest(unittest.TestCase):
             llm=llm,
         )
 
-        self.assertTrue(result["should_call_tool"])
-        self.assertEqual(result["tool_name"], "create_repair_ticket")
+        self.assertFalse(result["should_call_tool"])
+        self.assertIsNone(result["tool_name"])
+        self.assertEqual(result["intent"], "human_handoff_offer")
+        self.assertIn("是否需要", result["reply"])
 
     def test_model_selected_customer_service_intents_use_approved_replies(self):
         repair = build_plan_from_router({

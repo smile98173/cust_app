@@ -10,7 +10,7 @@ from app.services.controller_service import (
     normalize_time_range,
 )
 from app.config.settings import BAD_NAME_VALUES
-from app.config.legacy_prompts import SLOT_EXTRACTOR_RULES
+from app.config.slot_prompts import SLOT_EXTRACTOR_RULES
 from app.services.customer_validation import (
     CONTRACT_LOOKUP_LOGIN_REQUIRED_REPLY,
     has_authenticated_web_custnum,

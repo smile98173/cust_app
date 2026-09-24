@@ -7,40 +7,28 @@ from langchain_core.prompts import ChatPromptTemplate
 from app.schemas.router import RouterDecision
 from app.services.kb_answer_guard import is_definition_query
 from app.services.kb_service import (
-    detect_query_facets,
     detect_value_added_product_keys,
-    suggest_knowledge_entity,
-    value_added_query_aliases,
 )
 from app.services.company_profile import (
     DEFAULT_TV_CABLE,
-    build_company_link,
     build_company_context,
     build_company_info_reply,
     get_company_profile,
     is_contextual_website_page_request,
     is_explicit_company_website_request,
-    split_address_phone,
 )
 from app.services.router_catalog import (
-    AMBIGUOUS_TOPIC_REPLIES,
     DEFAULT_UNKNOWN_REPLY,
     MODEL_ROUTER_UNAVAILABLE_REPLY,
-    SMALLTALK_REPLIES,
     SUPPORTED_TOOLS,
     UNSUPPORTED_REPLY,
 )
-from app.config.settings import (
-    CUSTOMER_TOOL_FLOW_DISABLED_MESSAGE,
-    PROMOTION_QUERY_UNAVAILABLE_MESSAGE,
+from app.services.router_prompt import (
+    build_contextual_runtime_intent_router_rules,
+    select_runtime_policy_keys,
+    select_runtime_prompt_modules,
 )
-from app.services.router_prompt import build_intent_router_rules
 from app.services.troubleshooting_engine import (
-    detect_troubleshooting_type,
-    is_general_signal_fault_report,
-    is_direct_fault_report,
-    is_fault,
-    is_remote_control_issue,
     is_tv_authorization_issue,
 )
 from app.services.query_normalization import (
@@ -48,9 +36,8 @@ from app.services.query_normalization import (
     normalize_text_width,
     normalize_channel_name_from_query,
 )
-from app.services.regional_policy import build_policy_prompt, get_policy_text
+from app.services.regional_policy import build_policy_prompt
 from app.services.channel_context import (
-    is_service_availability_query,
     resolve_service_availability_target,
 )
 from app.services.receipt_image_evidence import (
@@ -59,9 +46,7 @@ from app.services.receipt_image_evidence import (
     current_verified_receipt_image_evidence,
     is_receipt_image_submission,
 )
-
-
-INTENT_ROUTER_RULES = build_intent_router_rules()
+from app.services.customer_validation import CONTRACT_LOOKUP_LOGIN_REQUIRED_REPLY
 
 
 COMPANY_INFO_CLARIFY_TERMS = (
@@ -97,21 +82,6 @@ BUSINESS_HOUR_TERMS = (
     "幾點關",
 )
 
-REPAIR_SERVICE_HOUR_TERMS = (
-    "電話報修客服時間",
-    "報修客服時間",
-    "報修時間",
-    "維修客服時間",
-    "維修報修時間",
-)
-
-WEBSITE_TERMS = (
-    "官網",
-    "官方網站",
-    "網站",
-    "網址",
-)
-
 VALUE_ADDED_URL_TERMS = (
     "加值服務網址",
     "加值服務網站",
@@ -141,10 +111,6 @@ PAPER_BILL_EXCLUSION_TERMS = (
     "barCode", "barcode", "7-11", "全家", "萊爾富", "ibon", "IBON", "FamiPort", "復線",
     "恢復訊號", "斷訊", "欠費",
 )
-PAPER_BILL_REQUEST_REPLY = (
-    "您好，請問您需要紙本帳單是有特別需求嗎？若方便，建議先使用簡訊帳單或線上信用卡繳費，快速又便利，謝謝。"
-)
-
 RECONNECTION_PROBLEM_TERMS = (
     "斷訊",
     "斷線",
@@ -212,14 +178,203 @@ TV_RECONNECTION_TERMS = (
 )
 
 WEB_HUMAN_HANDOFF_REPLY = "此項可由真人文字客服協助處理。"
-REPAIR_VISIT_EXPECTATION_REPLY = (
-    "若您已完成預約，工程人員通常會依排程或預約時段與您聯繫。"
-    "請您耐心等候；如已超過約定時段，歡迎再與我們聯繫，謝謝。"
+MEMBER_LOGIN_GUIDANCE_REPLY = (
+    "官網與哈TV行動客服 APP 的登入資料是分開的，不能共用。\n"
+    "1. 官網：使用用戶編號登入，用戶編號可從近期帳單查看。\n"
+    "2. 哈TV行動客服 APP：使用雲端帳號登入，通常為申請服務時留存的手機號碼。\n"
+    "若忘記密碼，請分別使用官網或 APP 登入頁的「忘記密碼」功能重設。"
 )
+ACCOUNT_HOLDER_CHANGE_FEE_REPLY = (
+    "變更使用者不需收取費用，需由原使用者與新使用者攜帶相關證件與印章，"
+    "至門市臨櫃辦理。"
+)
+ACCOUNT_HOLDER_CHANGE_DOCUMENTS_REPLY = (
+    "辦理變更使用者，請準備原使用者與新使用者雙方的身分證正本、"
+    "第二證件（健保卡或駕照）及印章，至門市臨櫃辦理即可。"
+)
+LINE_TV_CANCELLATION_REPLY = (
+    "您可在收視到期前停止繳納續期費用；"
+    "系統於到期日未收到款項後，即會自動停用 LINE TV 服務。"
+    "您可安心使用至當期最後一天。"
+)
+BROADBAND_SUSPENSION_GUIDANCE_REPLY = (
+    "寬頻暫停服務無法由線上 AI 直接代辦。"
+    "是否可辦理、可暫停期間、合約影響與可能費用，"
+    "需由客服依您目前的服務資料確認。"
+)
+MODEM_DS_LIGHT_STATUS_REPLY = (
+    "數據機重新啟動後，DS 燈短暫閃爍通常表示正在同步下行訊號。"
+    "若等待 3 到 5 分鐘後仍持續閃爍且無法上網，"
+    "表示尚未完成同步，需由客服協助確認線路或檢修。"
+)
+NETWORK_SPEED_TEST_GUIDANCE_REPLY = (
+    "請先重新啟動數據機，以電腦有線連接數據機，並暫停其他大量用網。"
+    "接著可使用台基科官網 https://www.tinp.net.tw/ 的「網速測試」，"
+    "或 https://www.speedtest.net/ 測試，再回覆下載與上傳結果。"
+)
+ONLINE_PAYMENT_ACCOUNT_HELP_REPLY = (
+    "用戶編號可從紙本帳單、簡訊帳單，或哈TV行動客服 APP 的帳務資料查看。"
+    "若仍無法確認，再由真人客服協助核對。"
+)
+ONLINE_PAYMENT_SUBMISSION_ISSUE_REPLY = (
+    "請先確認卡號、有效期限、安全碼末三碼與 3D 驗證是否正確，"
+    "再重新整理頁面、改用其他瀏覽器或稍後重試。"
+    "仍無法送出時，可改用超商、ATM 或臨櫃等繳費管道；"
+    "不可在聊天室提供完整卡號、安全碼或驗證碼。"
+)
+PAYMENT_POSTING_CONFIRMATION_REPLY = (
+    "繳費入帳或重新授權可能需要短暫作業時間。"
+    "請將對應的數據機、分享器或機上盒關機重開，等待約 2 分鐘後再確認；"
+    "入帳明細可至官網或哈TV行動客服 APP 查詢。"
+)
+WIFI_ROUTER_SETTINGS_HELP_REPLY = (
+    "請先連上目前 Wi-Fi，以瀏覽器開啟分享器管理網址並登入，"
+    "再至「Wi-Fi／無線網路／Wireless／WLAN」的安全性設定修改名稱或密碼。"
+    "儲存套用後，請讓各裝置使用新資料重新連線；"
+    "管理網址、帳密與選單名稱依品牌型號而異，請參閱原廠說明書。"
+)
+IDENTITY_DOCUMENT_UPLOAD_GUIDANCE_REPLY = (
+    "這個聊天服務不會代收身分證或雙證件照片。"
+    "為保護個人資料，請使用哈TV行動客服 APP 的雙證件上傳功能。"
+)
+SELF_OWNED_ROUTER_COMPATIBILITY_REPLY = (
+    "可以，公司沒有指定分享器品牌或型號，一般自備路由器都可使用。"
+    "請將路由器的上網方式設為「DHCP／自動取得 IP」即可。"
+)
+SELF_OWNED_ROUTER_SETUP_REPLY = (
+    "更換新路由器時，請將數據機的 LAN 埠連接至路由器的 WAN／Internet 埠，"
+    "並將上網方式設為「DHCP／自動取得 IP」。"
+    "公司採自動註冊機制，接上後通常可直接使用；Wi-Fi 名稱與密碼則依路由器說明書設定。"
+)
+MODEM_DUAL_ROUTER_DHCP_REPLY = (
+    "原則上可以，數據機 LAN1、LAN2 可分別連接不同路由器。"
+    "兩台路由器都請設為「DHCP／自動取得 IP」；若無法使用，再由真人客服協助確認。"
+)
+DYNAMIC_IP_ALLOCATION_COUNT_REPLY = (
+    "一般方案原則上提供 8 組浮動 IP；特殊方案的可用數量需另外確認。"
+)
+ROUTER_MANUAL_REGISTRATION_REPLY = (
+    "新路由器通常會自動完成設備註冊，接上後即可使用。"
+    "若已確認使用 DHCP／自動取得 IP 仍無法上網，請至台基科官網 "
+    "https://www.tinp.net.tw/ → 會員專區 →「電腦網卡更換註冊」完成手動註冊。"
+    "完成後若仍無法上網，我可以再協助您轉接真人文字客服。"
+)
+
+MODEL_HUMAN_HANDOFF_INTENT_ALIASES = {
+    "internet_service_cancellation_request",
+    "internet_service_termination_request",
+    "internet_service_cancellation_handoff",
+    "broadband_service_cancellation_request",
+    "broadband_termination_handoff",
+    "cable_tv_termination_handoff",
+    "service_termination_handoff",
+    "promotion_application_handoff",
+}
+
+MODEL_HUMAN_HANDOFF_FOLLOWUP_INTENTS = {
+    "broadband_termination_guidance",
+    "internet_cancellation_guidance",
+    "broadband_cancellation_guidance",
+    "internet_service_cancellation_guidance",
+    "service_termination_guidance",
+}
+
+MODEL_MEMBER_LOGIN_INTENTS = {
+    "member_login_guidance",
+    "member_account_login_guidance",
+}
+
+MODEL_ACCOUNT_HOLDER_CHANGE_FEE_INTENTS = {
+    "account_holder_change_fee_query",
+    "account_user_change_fee_query",
+}
+
+MODEL_ACCOUNT_HOLDER_CHANGE_DOCUMENT_INTENTS = {
+    "account_user_change_required_documents",
+    "account_holder_change_required_documents",
+}
+
+MODEL_SELF_OWNED_ROUTER_COMPATIBILITY_INTENTS = {
+    "self_owned_router_compatibility_guidance",
+    "customer_owned_router_compatibility",
+    "third_party_router_compatibility",
+}
+
+MODEL_SELF_OWNED_ROUTER_SETUP_INTENTS = {
+    "self_owned_router_setup_guidance",
+    "router_initial_setup_guidance",
+}
+
+MODEL_MODEM_DUAL_ROUTER_INTENTS = {
+    "modem_dual_router_dhcp_guidance",
+    "modem_multiple_router_guidance",
+}
+
+MODEL_DYNAMIC_IP_COUNT_INTENTS = {
+    "dynamic_ip_allocation_count",
+    "floating_ip_count_guidance",
+}
+
+MODEL_ROUTER_MANUAL_REGISTRATION_INTENTS = {
+    "router_manual_registration_guidance",
+    "network_device_manual_registration_guidance",
+}
+
 BROADBAND_TERMINATION_GUIDANCE_REPLY = (
     "您好，寬頻網路退租須由客服依您的合約狀態、設備歸還及可能費用確認。\n"
     "若仍在綁約期間，提前退租可能會有違約金。\n"
     "設備部分通常需歸還數據機及實際租借的相關配件，實際項目仍以客服查詢與現場設備為準。"
+)
+
+MODEL_APPROVED_DIRECT_REPLY_CONTRACTS = {
+    "broadband_termination_guidance": (
+        "寬頻網路退租",
+        BROADBAND_TERMINATION_GUIDANCE_REPLY,
+    ),
+    "broadband_service_suspension_guidance": (
+        "寬頻暫停服務",
+        BROADBAND_SUSPENSION_GUIDANCE_REPLY,
+    ),
+    "identity_document_upload": (
+        "身分證件上傳",
+        IDENTITY_DOCUMENT_UPLOAD_GUIDANCE_REPLY,
+    ),
+    "line_tv_cancellation_guidance": (
+        "LINE TV 取消與到期停用",
+        LINE_TV_CANCELLATION_REPLY,
+    ),
+    "modem_ds_light_status_guidance": (
+        "數據機 DS 燈狀態",
+        MODEM_DS_LIGHT_STATUS_REPLY,
+    ),
+    "network_speed_test_guidance": (
+        "網路測速操作",
+        NETWORK_SPEED_TEST_GUIDANCE_REPLY,
+    ),
+    "online_payment_account_help": (
+        "線上繳費用戶編號",
+        ONLINE_PAYMENT_ACCOUNT_HELP_REPLY,
+    ),
+    "online_payment_submission_issue": (
+        "線上繳費無法送出",
+        ONLINE_PAYMENT_SUBMISSION_ISSUE_REPLY,
+    ),
+    "payment_posting_confirmation_guidance": (
+        "已入帳但服務未恢復",
+        PAYMENT_POSTING_CONFIRMATION_REPLY,
+    ),
+    "personal_contract_info_lookup": (
+        "本人合約資訊查詢",
+        CONTRACT_LOOKUP_LOGIN_REQUIRED_REPLY,
+    ),
+    "wifi_router_settings_help": (
+        "Wi-Fi 名稱與密碼設定",
+        WIFI_ROUTER_SETTINGS_HELP_REPLY,
+    ),
+}
+REPAIR_VISIT_EXPECTATION_REPLY = (
+    "若您已完成預約，工程人員通常會依排程或預約時段與您聯繫。"
+    "請您耐心等候；如已超過約定時段，歡迎再與我們聯繫，謝謝。"
 )
 POINTS_ACCOUNT_MERGE_REPLY = (
     "您好，不同用戶編號的哈 Point 點數是分開累積的，目前無法合併或轉移，敬請見諒，謝謝。"
@@ -229,51 +384,14 @@ HUMAN_HANDOFF_TRIAGE_REPLY = (
     "若仍需要真人客服，我會提供轉接方式。"
 )
 HUMAN_HANDOFF_CONFIRM_REPLY = HUMAN_HANDOFF_TRIAGE_REPLY
-CARD_AUTOPAY_BINDING_STATUS_REPLY = (
-    "目前我無法直接查詢您的信用卡扣繳是否已綁定成功，"
-    "這需要由真人客服協助確認。\n"
-    "若您是想詢問「線上刷卡繳費後是否會自動開通」，"
-    "透過線上刷卡繳費、IBON及FAMIPORT繳費方式，系統會自動開通。"
-)
-CARD_AUTOPAY_APPLICATION_REPLY = (
-    "您可以到有線電視或網路官方網站登入會員專區後，"
-    "填寫您續期要扣款的信用卡資訊。"
-)
-CARD_AUTOPAY_DEFINITION_REPLY = (
-    "綁定循環扣款是指申請信用卡或銀行帳戶自動扣款。"
-    "申請完成後，後續帳款會依約定方式定期扣款；"
-    "實際可綁定方式與生效時間仍以客服確認為準。"
-)
 WIFI_VALUE_ADDED_YOUTUBE_REPLY = (
     "WiFi 加值服務主要是提供無線網路設備與 WiFi 訊號延伸，本身不是 YouTube 或影音 App 功能。\n"
     "加值 WiFi 後，手機、平板、智慧電視或支援 YouTube 的設備可透過網路使用 YouTube；"
     "若是數位機上盒能否直接開 YouTube，仍需依機型與系統支援確認。"
 )
-TATUNG_TV_INSTALL_REPLY = (
-    "大屯有線電視裝機可先參考基本頻道報價：\n"
-    "基本收視費：月繳 550 元、季繳 1,650 元、半年繳 3,280 元、年繳 6,550 元。\n"
-    "裝機費：\n"
-    "月繳／季繳：裝機費 1,500 元。\n"
-    "半年繳：裝機優惠價 1,000 元；若未滿半年退租，需補收優惠差額 500 元。\n"
-    "年繳：裝機優惠價 600 元；若未滿 1 年退租，需補收優惠差額 900 元。\n"
-    "第 1、2 台機上盒免費借用、免押金；實際仍需由客服確認服務地址、裝設條件與可約時間。"
-)
-PURE_NETWORK_INSTALL_KNOWLEDGE_QUERY = (
-    "目前有效的純網方案總覽 請列出所有符合方案的方案名稱 服務類型 活動期間 "
-    "純網方案 一般寬頻方案 網路裝機申請 單辦寬頻 單辦網路 單一網路 單純網路 "
-    "速率 月繳 季繳 半年繳 年繳 裝機費 寬頻設備押金 綁約 違約金 "
-    "只找純網方案，排除電視同裝。"
-)
 PURE_TV_INSTALL_KNOWLEDGE_QUERY = (
     "純有線電視 單辦有線電視 第四台 基本收費標準 基本收視費 "
     "月繳 季繳 半年繳 年繳 裝機費 機上盒押金 分機費"
-)
-TV_NETWORK_INSTALL_KNOWLEDGE_QUERY = (
-    "同時申裝有線電視與寬頻網路 電視+網路方案 電視網路同裝方案 "
-    "有線電視加網路 "
-    "方案名稱 活動期間 速率 月繳 季繳 半年繳 年繳 裝機費 設備押金 "
-    "贈品 加值服務 綁約 違約金 "
-    "請回答電視+網路同裝方案內容，不要回答純網方案。"
 )
 PROMOTION_SERVICE_SCOPE_CLARIFY_REPLY = (
     "請問您想了解哪一類優惠方案？\n"
@@ -281,80 +399,13 @@ PROMOTION_SERVICE_SCOPE_CLARIFY_REPLY = (
     "2. 純網路\n"
     "3. 純有線電視"
 )
-SPEED_TEST_GUIDE_REPLY = (
-    "可以這樣測試寬頻網路速度：\n"
-    "1. 先將網路數據機電源關閉後重新啟動。\n"
-    "2. 連上測速網站（例如 www.speedtest.net）進行測速。\n"
-    "3. 測速時建議確認裝置已正常連線，並暫停其他下載或串流。\n"
-    "若測速結果明顯低於您申請的頻寬，請聯繫客服協助確認。"
-)
-NETWORK_SCOPE_CLARIFY_REPLY = (
-    "了解，您說的是網路連線不順。請問是家中所有手機、電腦都不順，還是只有單一設備？\n"
-    "也請確認數據機燈號是否有紅燈或異常閃爍；確認後我再依狀況帶您排除或協助安排報修。"
-)
-WIFI_ROUTER_PASSWORD_REPLY = (
-    "修改家中 Wi-Fi 密碼時，請先用手機或電腦連上目前的 Wi-Fi，再開啟瀏覽器輸入分享器說明書上的管理網址並登入。\n"
-    "進入「Wi-Fi／無線網路／Wireless／WLAN」後，找到「安全性／Security」或 Wi-Fi 密碼欄位，"
-    "輸入新密碼並按儲存／套用；修改後原本連線的裝置會斷線，請用新密碼重新連線。\n"
-    "若不清楚管理網址、登入帳密或型號，請查看分享器機身貼紙或原廠使用說明書。"
-)
-TV_SAFE_MODE_REPLY = (
-    "機上盒本身沒有「安全模式」功能；若電視畫面顯示「安全模式」，通常是電視本體的系統功能所致。\n"
-    "建議先將電視電源拔除，等待約 1 分鐘後再重新插上並開機。\n"
-    "若重新啟動後仍顯示「安全模式」，建議參考電視品牌提供的使用說明書，或洽詢電視原廠客服進一步確認。"
-)
-ALL_CHANNELS_REBOOTED_REPLY = (
-    "了解，機上盒已重開機但全部頻道仍無法收視。\n"
-    "這種情況需要由真人客服協助確認訊號、帳務授權或安排維修，請不要重複重開機。"
-)
-BILL_AMOUNT_DIFFERENCE_REPLY = (
-    "您好，目前線上 AI 無法直接查詢上期繳費金額或逐項比對帳單差異。"
-    "建議您登入哈TV行動客服 APP 或官網查詢帳單歷史；"
-    "若仍需確認本期與上期金額不同的原因，請由真人客服協助核對您的帳務資訊。"
-)
 BASIC_CHANNEL_TABLE_REPLY = (
     "基本頻道就是有線電視頻道。您可以到系統台官網的頻道查詢頁面查看最新頻道表；"
     "實際可收視頻道仍以您所在地區與系統台公告為準。"
 )
-BASIC_VS_DIGITAL_CHANNEL_REPLY = (
-    "基本頻道是申裝有線電視後可收看的主要頻道，頻道內容與號碼依所在地區及系統台公告為準。\n"
-    "數位頻道通常是額外的數位付費套餐或加值頻道，需要另外訂購或符合方案內容才會授權收看。\n"
-    "數位套餐的詳細內容及費用，歡迎至官網查詢參考。"
-)
-NETWORK_LINE_OWNERSHIP_REPLY = (
-    "一般家用寬頻會以每戶獨立申裝、獨立管理為主，不會把多戶帳務合併成同一個一般用戶方案。\n"
-    "但若是房東或學舍統一申請的學舍／套房方案，可能會由房東統一管理後提供住戶使用；"
-    "實際是獨立線路或區域共用，仍要以您申裝的方案與現場設備配置為準。"
-)
-APP_CONVENIENCE_BARCODE_REPLY = (
-    "哈TV行動客服 APP 可依帳單與繳費方式提供繳費資訊。若您的帳單支援超商條碼，"
-    "登入 APP 後可到「待繳帳單」查看或產生可繳費的條碼。\n"
-    "若您目前使用的是簡訊帳單，請直接開啟收到的簡訊帳單連結，依頁面指示繳費即可，"
-    "不一定需要另外在 APP 產生超商條碼。"
-)
-CONVENIENCE_STORE_PAYMENT_FAILED_REPLY = (
-    "若目前無法在便利商店繳費，可能是帳單條碼過期、金額或帳務狀態需重新確認。\n"
-    "您可以改用官網線上繳費、哈TV行動客服 APP、臨櫃繳費，或請真人客服協助補發簡訊帳單。"
-    "若要補發簡訊帳單，仍需提供戶名與登記電話供核對。"
-)
-OUTBOUND_CALL_LOOKUP_REPLY = (
-    "目前線上 AI 無法查詢是否有客服人員外撥給您，也無法確認來電原因。\n"
-    "若您想確認剛剛的來電是否為本公司客服，建議由真人客服協助核對通話紀錄與通知事項。"
-)
-ONLINE_PAYMENT_APP_PASSWORD_REPLY = (
-    "線上繳費登入時，請先依登入頁面確認帳號資訊。"
-    "若忘記密碼，請使用登入頁的「忘記密碼」依畫面指示重設；若要修改密碼，請登入後依帳戶設定指示變更。"
-    "若頁面無法完成操作，請由客服核對帳號資料後協助處理。"
-)
 VIRTUAL_HOSTING_UNSUPPORTED_REPLY = (
     "您好，目前本公司未提供「虛擬主機」服務，抱歉無法協助辦理。"
 )
-IDENTITY_DOCUMENT_UPLOAD_REPLY = (
-    "您好，目前此線上服務無法代收或上傳身分證件。\n"
-    "若您需要補件或辦理相關申請，為保障個資安全，請下載哈TV行動客服 APP，"
-    "並透過 APP 進行雙證件上傳。"
-)
-
 HUMAN_HANDOFF_REQUEST_PATTERNS = (
     "找真人",
     "找真人客服",
@@ -481,27 +532,6 @@ RENEWAL_PROCESS_ACTION_TERMS = (
     "去哪",
 )
 
-VAGUE_NETWORK_TROUBLESHOOTING_TERMS = (
-    "網路排除",
-    "網路故障排除",
-    "寬頻排除",
-    "寬頻故障排除",
-)
-
-NEW_INSTALL_TERMS = (
-    "裝機申請",
-    "網路裝機",
-    "裝網路",
-    "安裝網路",
-    "申裝網路",
-    "想裝網路",
-    "我要裝網路",
-    "想安裝網路",
-    "我要安裝網路",
-    "新申辦",
-    "申裝",
-)
-
 NEW_INSTALL_FAULT_CONTEXT_TERMS = (
     "不能用",
     "不能上網",
@@ -513,16 +543,6 @@ NEW_INSTALL_FAULT_CONTEXT_TERMS = (
     "燈號",
     "裝好後",
     "安裝後",
-)
-
-ONE_YEAR_NETWORK_CONTRACT_TERMS = (
-    "只綁一年",
-    "綁一年",
-    "一年約",
-    "一年合約",
-    "合約一年",
-    "12個月",
-    "十二個月",
 )
 
 SET_TOP_BOX_MULTI_FEE_DEVICE_TERMS = (
@@ -562,42 +582,6 @@ SET_TOP_BOX_MULTI_FEE_COST_TERMS = (
     "施工費",
     "怎麼算",
     "多少錢",
-)
-
-UPGRADE_LINE_TERMS = (
-    "升級",
-    "升速",
-)
-
-LINE_CHANGE_TERMS = (
-    "改線",
-    "更改線路",
-    "換線",
-    "線路",
-)
-
-RELOCATION_TERMS = (
-    "搬家",
-    "移機",
-    "搬遷",
-    "搬過去",
-    "搬到",
-)
-
-RELOCATION_FEE_TERMS = (
-    "費用",
-    "多少錢",
-    "多少",
-    "收費",
-    "價格",
-    "價錢",
-)
-
-RELOCATION_NETWORK_ONLY_TERMS = (
-    "只移網路",
-    "只辦理網路",
-    "只移寬頻",
-    "只搬網路",
 )
 
 COMBO_PLAN_TERMS = (
@@ -704,38 +688,6 @@ PROMOTION_COMPANY_INFO_BLOCK_TERMS = (
     "家電",
     "冰箱",
     "投影機",
-)
-
-BROADBAND_PRICE_TERMS = (
-    "寬頻費",
-    "網路費",
-    "上網費",
-    "寬頻費用",
-    "網路費用",
-    "上網費用",
-    "寬頻多少錢",
-    "網路多少錢",
-    "上網多少錢",
-    "最便宜的上網",
-    "最便宜上網",
-    "最便宜網路",
-    "網路最便宜",
-    "寬頻最便宜",
-    "只要網路",
-    "單辦網路",
-    "單裝網路",
-)
-
-BROADBAND_PRICE_EXCLUDE_TERMS = (
-    "移機",
-    "搬家",
-    "退租",
-    "拆機",
-    "停用",
-    "欠費",
-    "欠繳",
-    "帳單",
-    "發票",
 )
 
 PERSONAL_SERVICE_FEE_SUBJECT_TERMS = (
@@ -850,92 +802,9 @@ PROMOTION_PRICE_DIFFERENCE_REPLY = (
     "並提供進一步說明，謝謝。"
 )
 
-PRICE_COMPLAINT_REPLY = (
-    "您好，了解您對費用的疑問。若您願意，我們可協助轉由文字客服專人為您確認目前方案及適用優惠，謝謝。"
-)
-
-PERSONAL_CONTACT_PHONE_CHANGE_REPLY = (
-    "您好，聯絡電話變更涉及個人資料，線上 AI 無法直接修改。"
-    "請由真人客服協助確認身分資料後辦理變更，謝謝您。"
-)
-
-PAYMENT_NOT_POSTED_REPLY = (
-    "您好，門市或刷卡繳費後，帳務更新可能需要作業時間，通常不一定會即時沖帳。\n\n"
-    "請先保留繳費收據或交易明細，以便後續核對。\n\n"
-    "若需確認是否已入帳，建議提供繳費收據資訊，由真人客服協助查詢。"
-)
-
-PAST_PAYMENT_RECORD_REPLY = "若需查詢已繳費明細或入帳紀錄，可至行動客服 APP 或官網查閱。很高興為您服務，謝謝。"
-
-NEXT_BILL_AFTER_NO_UNPAID_REPLY = "您好，目前系統可協助查詢本期待繳帳單。待下期帳單產生後，請留意相關通知，謝謝。"
-
-UNSUPPORTED_BILL_DETAIL_REPLY = (
-    "您好，目前系統可協助查詢本期待繳帳單。"
-    "若需查看帳單期間、繳費起訖日、已繳費明細或入帳紀錄，"
-    "可至行動客服 APP 或官網查閱，謝謝。"
-)
-
-STORE_PAYMENT_STILL_BILLED_REPLY = (
-    "您好，超商繳費入帳可能需要作業時間，通常不一定會即時更新。\n\n"
-    "請先保留繳費收據或交易明細，以便後續核對。\n\n"
-    "若需確認是否已入帳，建議提供繳費收據資訊，由真人客服協助查詢。"
-)
-
-TV_600_FEE_CLARIFY_REPLY = (
-    "一般有線電視基本收視費目前是月繳 $540。"
-    "若您看到或聽到「一個月 $600」，通常可能是新裝機贈送的聯網機上盒體驗或 LINE TV 體驗到期後恢復原價收費。"
-    "若續期後不使用相關體驗或加值服務，可由客服協助確認是否可取消，並恢復一般有線電視收費。"
-)
-
-HATV_PLUS_YOUTUBE_REPLY = (
-    "您好，目前公司提供的機上盒分為聯網型及非聯網型。"
-    "如有聯網需求，可加購每月 60 元換裝聯網型機上盒，聯網型機上盒可使用 YouTube、LINE TV 等數位串流功能。\n"
-    "實際是否符合申辦及換裝條件，需由客服依您的地址、合約狀態及適用方案進行確認，謝謝您。"
-)
-
-LINE_TV_OPENING_REPLY = (
-    "要訂購或開通 LINE TV，可先確認家中是否已安裝雙模機／聯網機上盒。\n"
-    "已安裝者：可用遙控器進入 VIP會員 → 優惠專區 → 加值服務 → LINE TV 進行加購。\n"
-    "尚未安裝聯網機上盒者：請透過 LINE 搜尋並加入「台數科」官方帳號，發送訊息請客服協助報價安裝。\n"
-    "若已購買 LINE TV：請先在電視或雙模機下載並開啟 LINE TV 電視版 App，"
-    "再用手機或平板的 LINE TV App 進入「個人」頁，點選右上角掃描圖示，"
-    "掃描電視上的 QR code，或手動輸入電視顯示的 6 位代碼後登入觀看。"
-)
-
-STOP_WATCHING_CLARIFY_REPLY = (
-    "了解，請問您是想辦理退租／終止服務，還是想暫停收看一段時間？\n"
-    "若是退租或提前終止合約，可能會有違約金或設備歸還等事項，需由客服依您的合約資料確認。"
-)
-
-ROUTER_REPLACEMENT_CLARIFY_REPLY = (
-    "請問您是更換分享器後無法上網，還是分享器故障想更換設備？\n"
-    "若是更換分享器後無法上網，一般將設備接上網路數據機後，系統會自動註冊，重啟電腦即可連線。"
-    "若未自動註冊，可至台基科官網 https://www.tinp.net.tw/ → 會員專區 → 電腦網卡更換註冊，"
-    "依頁面提示完成登入或驗證後再重啟電腦。\n"
-    "若是分享器故障要更換，通常分享器為客戶自備；如有租用公司 WiFi 服務，需由客服確認申裝方案。"
-)
-
-WCTV_NEW_NETWORK_EQUIPMENT_REPLY = (
-    "一般來說，將新設備接上網路數據機後，系統會自動把設備註冊到客戶端資料庫；"
-    "請先重新啟動電腦後再確認是否可連線。\n\n"
-    "若仍未自動註冊，可至台基科官網 https://www.tinp.net.tw/ → 會員專區 →「電腦網卡更換註冊」，"
-    "依頁面提示完成登入或驗證後，再重新啟動電腦即可。"
-)
-
-DS_LIGHT_BLINKING_REPLY = (
-    "DS 燈閃爍通常代表數據機正在同步下行訊號，不一定是正常完成連線狀態。"
-    "請先將數據機電源拔掉約 10 秒後重新插上，等待 3 到 5 分鐘。"
-    "若 DS 燈仍持續閃爍或無法上網，請由客服協助確認線路或安排檢修。"
-)
-
 GENERAL_CHANNEL_E004_REPLY = (
     "若一般基本頻道也顯示 E004、授權到期或未授權，請先確認收視費是否已繳清。\n"
     "若尚未繳費，我可以先協助您進行電視暫時復線；請問需要我現在協助嗎？"
-)
-
-ONLINE_PAYMENT_DONE_REPLY = (
-    "如您已透過官網或哈TV行動客服 APP 完成線上繳費，系統會自動開通。"
-    "若仍無法使用，請先重啟數據機或機上盒後再確認；如仍未恢復，請由客服協助確認入帳與授權狀態。"
 )
 
 APP_PAYMENT_RECEIPT_REPLY = (
@@ -961,35 +830,6 @@ CLOUD_ACCOUNT_APP_GUIDE_REPLY = (
     "若無法登入或忘記密碼，請依 APP 登入頁的指示處理，或由客服協助核對帳號資料。"
 )
 
-TV_NO_PROGRAM_CLARIFY_REPLY = (
-    "了解，想先確認目前電視的狀況：是完全沒有畫面、只有部分頻道無法收視，"
-    "還是畫面有顯示錯誤代碼？請告訴我畫面情況或錯誤代碼，我再帶您處理。"
-)
-
-HALF_YEAR_ONLINE_PAYMENT_REPLY = (
-    "半年繳可先透過以下方式繳費：\n"
-    "1. 官網線上繳費／信用卡刷卡：至官方網站「線上繳費專區」，輸入用戶編號與密碼後依指示繳費。\n"
-    "2. APP 繳費：下載哈TV行動客服 APP，註冊或登入後依指示繳費。\n"
-    "但線上客服無法直接協助更改繳別；若您要改成半年繳，需由客服確認帳務與可變更狀態。"
-)
-
-MEMBER_REGISTRATION_REPLY = (
-    "申請本公司電視或網路服務後，系統即會產生一組用戶編號，無須另外註冊會員。"
-    "如需查詢用戶編號，可查看每月帳單，通常會列於帳單上；若仍查不到，請由客服協助核對。"
-)
-
-SET_TOP_BOX_RELOCATION_PAYMENT_REPLY = (
-    "機上盒移機流程如下：\n"
-    "申請方式：請聯繫客服協助登記移機。\n"
-    "確認事項：客服會先確認新地址或移機位置是否有線路可安裝。\n"
-    "費用：室內移機 500 元；室外移機 800 元。工程施工完畢後現場收取現金。\n"
-    "後續安排：確認可移機後，客服會協助處理移機手續與安排作業。"
-)
-
-WIRELESS_NETWORK_CLARIFY_REPLY = (
-    "請問您是要新申請寬頻網路，還是已經有寬頻網路、想加裝 WiFi 分享器來使用無線功能？"
-)
-
 WIFI_VALUE_ADDED_SERVICE_REPLY = (
     "WiFi 加值服務目前可參考：\n"
     "WiFi 5 系列分享器：月均價 25 元，限半年繳 150 元或年繳 300 元。\n"
@@ -1007,27 +847,6 @@ CONNECTED_STB_YOUTUBE_REPLY = (
     "您好，目前公司提供的機上盒分為聯網型及非聯網型。"
     "如有聯網需求，可加購每月 60 元換裝聯網型機上盒，聯網型機上盒可使用 YouTube、LINE TV 等數位串流功能。\n"
     "實際是否符合申辦及換裝條件，需由客服依您的地址、合約狀態及適用方案進行確認，謝謝您。"
-)
-
-WCTV_FIXED_IP_BINDING_REPLY = (
-    "您可以使用要綁定固定 IP 的設備前往台基科官網 https://www.tinp.net.tw/，"
-    "依序選擇「會員登入」→「綁定固定 IP」，輸入帳號與密碼後，依畫面指示完成綁定。"
-)
-
-DHCP_NOT_PPPOE_REPLY = (
-    "您好，本公司網路連線採用 DHCP 自動取得 IP，不使用 PPPoE 撥號方式，"
-    "因此不需要輸入 PPPoE 帳號及密碼。請將網路連線設定為「自動取得 IP」即可。"
-)
-
-WIFI_ROUTER_SETUP_REPLY = (
-    "您好，Wi-Fi 機器的設定方式會依分享器型號而有所不同，"
-    "建議依您使用的分享器型號參考設定流程或使用說明書操作。"
-)
-
-PREPAY_LOOKUP_REPLY = (
-    "預繳前建議先確認目前是否有待繳帳單；登入會員會依 API 帶入的客戶資料查詢，"
-    "若仍需人工核對，請提供戶名與聯絡電話。\n"
-    "如有待繳帳單，會回覆目前帳單金額；如無待繳帳單，則會回覆目前無費用需繳納。"
 )
 
 CNT_SEASONAL_AUTHORIZATION_REPLY = (
@@ -1064,17 +883,6 @@ CANCEL_TV_KEEP_INTERNET_REPLY = (
     "您好，若您希望停用有線電視服務並保留網路，"
     "將由文字客服專人協助確認您的服務內容及後續辦理方式，"
     "謝謝。"
-)
-
-CHANNEL_QUERY_TERMS = (
-    "第幾台",
-    "哪個頻道",
-    "頻道位置",
-    "在哪一台",
-    "在幾台",
-    "哪一台",
-    "哪台",
-    "幾台",
 )
 
 CLEAR_CHANNEL_GROUP_TERM = "清冰組"
@@ -1221,24 +1029,6 @@ BILL_CONTENT_QUERY_TERMS = (
     "繳費金額",
 )
 
-ADVANCED_NETWORK_SETTING_TERMS = (
-    "橋接",
-    "橋接器",
-    "路由器",
-    "zyxel",
-    "Zyxel",
-)
-
-PASSWORD_TERMS = (
-    "忘記密碼",
-    "密碼忘記",
-)
-
-REMOTE_CONTROL_TERMS = (
-    "遙控器",
-    "遙控",
-)
-
 DIRECT_FAULT_REPORT_TERMS = (
     "故障",
     "報故障",
@@ -1365,36 +1155,10 @@ PAYMENT_METHOD_REPLY = (
     "實際可用方式仍以帳單與客服確認為準。"
 )
 
-CARD_PAYMENT_METHOD_REPLY = (
-    "線上刷卡／信用卡繳費可用以下方式：\n"
-    "1. 線上繳費：至官方網站「線上繳費專區」，輸入用戶編號與密碼後依指示進行信用卡繳費。\n"
-    "2. APP 繳費：下載哈TV行動客服 APP，註冊或登入後依指示進行信用卡繳費。"
-)
-
-TRIPLE_PLAY_BILL_ITEM_REPLY = (
-    "三合一方案通常是指寬頻網路及電視服務，並提供數位電視盒供收視使用。\n"
-    "若是帳單上的「三合一方案」項目，實際內容仍需依您的帳務資料由客服確認。"
-)
-
 SMS_BILL_REGISTERED_PHONE_REPLY = (
     "簡訊帳單只能寄送到登記電話，無法改寄或指定寄送到其他電話。\n"
     "若要補發簡訊帳單，請提供戶名與登記電話供核對；"
     "若需變更登記電話，需由真人客服協助確認。"
-)
-
-ONLINE_PAYMENT_ACTIVATION_REPLY = (
-    "線上繳費方式：\n"
-    "1. 官方網站：至「線上繳費專區」，輸入用戶編號與密碼後依指示完成繳費。\n"
-    "2. 哈TV行動客服 APP：下載 APP 並註冊或登入後，依指示完成線上刷卡繳費。\n"
-    "貼心提醒，透過線上刷卡繳費、IBON及FAMIPORT繳費方式，系統會自動開通喔；"
-    "若仍無法使用，請重啟數據機或機上盒後再確認。"
-)
-
-TV_AUTHORIZATION_PAYMENT_REPLY = (
-    "畫面顯示「未授權」時，請先確認目前停在哪一個頻道。\n"
-    "若為 200 頻道以上，可能是付費頻道、需另行訂閱或尚未加購；"
-    "請先按頻道向下鍵，切換至 200 頻道以下的一般基本頻道確認。\n"
-    "若一般基本頻道也顯示 E004、授權到期或未授權，再協助確認收視費與授權狀態。"
 )
 
 TV_PASSWORD_PROMPT_REPLY = (
@@ -1417,42 +1181,6 @@ AREA_REPAIR_STATUS_REPLY = (
     "建議由真人客服依報修紀錄、地址與聯絡電話協助查詢最新維修進度。"
 )
 
-ADDRESS_CONTRACT_LOOKUP_REPLY = (
-    "若您詢問的地址與目前登入帳號不一定相同，不能直接用登入客編回覆合約內容。\n"
-    "請由真人客服依姓名、聯絡電話與服務地址逐筆核對後，再確認該地址的合約資訊。"
-)
-
-PERSONAL_BILLING_ADDRESS_REPLY = (
-    "線上客服無法直接提供您的個人帳單寄送地址。"
-    "如需查詢或變更帳單寄送地址，請由真人客服協助核對身分後確認。"
-)
-SERVICE_TERMINATION_WITH_CONTRACT_REPLY = (
-    "若您要提前終止合約或辦理退租，辦理流程如下：\n"
-    "1. 向客服提出退租申請。\n"
-    "2. 客服核對目前的服務項目、合約狀態與退租資格。\n"
-    "3. 依核對結果告知可辦理時間及後續安排。\n"
-    "仍在綁約期間提前終止，可能產生違約金；實際是否可辦理、合約剩餘期間與相關費用，"
-    "須以客服查詢的合約資料為準。"
-)
-ONLINE_PAYMENT_RECEIPT_REPLY = (
-    "使用 APP 或官網線上繳費後，通常不會另外寄送實體收據到府。"
-    "費用入帳後，發票號碼會於營業日以簡訊通知用戶。\n"
-    "您也可自行查詢：\n"
-    "1. 官網：客戶服務 → 發票查詢，依頁面提示登入或驗證後即可查詢。\n"
-    "2. 哈TV行動客服 APP：註冊後登入帳密 → 歷史帳單即可查詢。\n"
-    "若需要申請發票號碼載具歸戶，可到公司官網的客戶服務 → 發票查詢，"
-    "輸入用戶帳號密碼後點選「用戶歸戶」，並連結財政部網站進行歸戶。"
-)
-MOBILE_CASTING_REPLY = (
-    "手機投影到電視需視手機、電視型號及使用設備是否支援投影功能而定。"
-    "一般可透過手機內建的螢幕鏡像、投放或 AirPlay 等功能，"
-    "將畫面投影至支援的電視或相關設備；實際操作方式請依手機與電視設備說明為準。"
-)
-LINE_TV_OPENING_QUERY = (
-    "LINE TV 開通 訂購 雙模機 聯網機上盒 VIP會員 優惠專區 加值服務 "
-    "LINE TV 電視版 App QR code 掃描 6位代碼 登入"
-)
-
 INVOICE_CARRIER_REPLY = (
     "您可以透過以下步驟在我們的官網完成發票手機條碼載具歸戶：\n"
     "1. 前往官方網站。\n"
@@ -1465,65 +1193,12 @@ INVOICE_CARRIER_REPLY = (
     "8. 最後點擊「確定」完成綁定。"
 )
 INVOICE_CARRIER_BINDING_CONFIRMATION_REPLY = "請問您是想將發票歸戶到手機條碼載具嗎？"
-LINE_TV_TOPIC_CLARIFY_REPLY = (
-    "請問您想詢問 LINE TV 的哪一種問題？例如：如何在機上盒開通／登入、無法收看、費用，"
-    "或是 LINE TV 能不能在電視上看。"
-)
-STB_TUTORIAL_STUCK_REPLY = (
-    "畫面一直卡在機上盒教學時，請先確認遙控器是否可正常操作：按鍵時遙控器燈號是否會亮，"
-    "也可先更換電池再試。\n"
-    "若遙控器正常，請嘗試將機上盒恢復原廠預設，完成後按頻道上／下鍵確認是否可進入一般收視畫面。"
-    "若仍卡住，再將機上盒電源拔掉約 10 秒後重新插上，等待 2 到 3 分鐘後確認。"
-)
-ADDRESS_SERVICE_PLAN_LOOKUP_REPLY = (
-    "無法依地址查詢您目前申請的網路速率或方案。\n"
-    "若您是登入會員，系統會依 API 帶入的客戶資料協助查詢；若仍需人工核對，請提供戶名與聯絡電話。"
-)
-CONTRACT_CHANGE_REPLY = (
-    "可以詢問換約或轉換方案，但能不能轉、是否需要補差額或是否會有違約金，"
-    "都要依您目前合約狀態、剩餘期間與想改的方案確認。\n"
-    "若您確定想換方案，請告訴我想改成哪一個方案，後續需由真人客服協助查詢並確認可辦理條件。"
-)
-GENERIC_FEE_LOOKUP_CLARIFY_REPLY = (
-    "請問您想查的是哪一類費用：有線電視月費、寬頻網路方案費用、加值服務費用，"
-    "還是目前帳單／合約上的費用？\n"
-    "若是查您自己的帳單或目前方案，登入會員會依 API 帶入的客戶資料查詢；若仍需人工核對，請提供戶名與聯絡電話。"
-)
 SERVICE_SUSPENSION_REPLY = (
     "若您說的「停機」是暫停服務／暫停收看，通常需由登記人辦理，並由客服確認目前合約、設備與費用狀態。\n"
     "暫停收視通常需保留至少 1 個月以上月租；3 個月內復機一般免收復機費，超過 3 個月復機費為 200 元。"
     "辦理方式以臨櫃為主，登記人需帶雙證件與印章；代辦則需雙方雙證件與印章。\n"
     "若您其實是要退租／終止服務，流程與費用會不同，需要另外由客服確認。"
 )
-TV_ONLY_PROMOTION_REPLY = (
-    "若只申裝有線電視，會以有線電視基本收視費、裝機費與所在地區公告方案為主，"
-    "不會套用寬頻同裝優惠。\n"
-    "若您想確認目前單辦有線電視的費用或優惠，請提供服務地區，我再協助查詢對應系統台資訊。"
-)
-PURE_TV_INSTALL_REPLY = (
-    "可以，若只申裝有線電視，客服需依實際裝機地址確認可安裝狀況、基本收視費、裝機費與機上盒相關費用。\n"
-    "請提供服務地址、是否新裝，以及需要幾台電視收看，後續可由真人客服協助確認可辦內容與費用。"
-)
-NEXT_TIER_PLAN_FEE_REPLY = (
-    "若是想升級到再高一階的方案，可以先參考目前主推寬頻或電視加網路方案；"
-    "但實際月費差額、是否能直接轉換、合約是否需要累加或重簽，都要依您目前合約與想升級的方案確認。\n"
-    "若您告訴我想升級到的速率或方案名稱，後續需由真人客服查詢後確認可辦理條件與實際費用。"
-)
-
-OVERDUE_DISCONNECTION_REPLY = (
-    "若因忘記繳費而被斷訊，請先完成繳費；可透過官方網站線上繳費專區、"
-    "哈TV行動客服 APP、超商條碼或臨櫃繳款。\n"
-    "若沒有帳單或條碼，可請真人客服協助補發簡訊帳單或核對應繳金額。\n"
-    "入帳後服務恢復可能需要一段作業時間；請將數據機或機上盒關機約 10 秒再重新開機確認是否已復線。\n"
-    "若已繳費仍未開通，請保留繳費收據或交易明細，由真人客服協助確認入帳與復線狀態。"
-)
-REFUND_CALCULATION_REPLY = (
-    "目前系統無法直接查詢或計算解約退費金額。\n"
-    "是否可退費及實際金額，需依您的服務項目、合約狀態、繳別、已使用期間與帳務狀態，"
-    "由真人客服協助確認。\n"
-    "請先保留繳費收據或交易明細，以便後續核對。"
-)
-
 CABLE_TV_TERMINATION_CALCULATION_REPLY = (
     "有線電視退租的費用或退費沒有固定公式，需依目前合約、繳別、已使用期間、"
     "帳務及設備歸還狀況確認；若仍在合約期間，提前解約可能產生違約金。\n"
@@ -1548,24 +1223,6 @@ POINTS_USAGE_FALLBACK_REPLY = (
     "- 可透過哈TV行動客服 APP 查詢點數，並在線上刷卡繳費時折抵。\n"
     "- 也可持有行動客服 APP 的手機到櫃台折抵繳費。\n"
     "- 若已設定定期自動扣款，需提前聯絡客服申請點數抵扣。"
-)
-
-BROADBAND_UNLIMITED_REPLY = (
-    "您好，您目前申辦的是非流量制寬頻方案，沒有流量使用上限，"
-    "可不限流量正常使用，請您放心。"
-)
-
-LOW_INCOME_500M_YEAR_REPLY = (
-    "【方案名稱】\n"
-    "低收入戶優惠方案\n"
-    "【優惠內容】\n"
-    "500M 寬頻：一般寬頻 500M/500M 年繳 $12,000，低收入戶寬頻連線費一律半價，"
-    "收半年繳可使用一年，因此一年寬頻費用為 $6,000。\n"
-    "裝機費：0 元。\n"
-    "【申請方式】\n"
-    "需本人至門市臨櫃辦理，並提供有效低收入戶證明。\n"
-    "【限制條件】\n"
-    "每年須重新申請；次年若未取得低收入戶證明，會恢復原價。"
 )
 
 VALUE_ADDED_SERVICE_QUERY_TERMS = (
@@ -1750,49 +1407,6 @@ SOCIAL_DISCOUNT_ALTERNATIVE_PROMOTION_TERMS = (
     "網路報價",
 )
 
-REMOTE_PRICE_TERMS = (
-    "遙控器多少錢",
-    "遙控器價格",
-    "遙控器費用",
-)
-
-APPLE_PAY_TERMS = (
-    "apple pay",
-    "APPLE PAY",
-    "Apple Pay",
-)
-
-WIFI_AP_SETTING_TERMS = (
-    "無線ap",
-    "無線AP",
-    "wifi ap",
-    "WIFI AP",
-    "分享器設定",
-    "wifi分享器設定",
-    "WIFI分享器設定",
-)
-
-WIFI_ROUTER_SALE_TERMS = (
-    "賣wifi分享器",
-    "賣WIFI分享器",
-    "賣 WiFi 分享器",
-    "賣 WIFI 分享器",
-    "賣分享器",
-    "買wifi分享器",
-    "買WIFI分享器",
-    "買分享器",
-    "公司有在賣",
-)
-
-ENGINEER_WEEKEND_TERMS = (
-    "工程師假日",
-    "工程假日",
-    "假日有上班",
-    "假日可以維修",
-    "假日可以裝機",
-    "假日有空可以約裝機",
-)
-
 TV_AUTHORIZATION_TERMS = (
     "E004",
     "e004",
@@ -1806,39 +1420,6 @@ TV_AUTHORIZATION_TERMS = (
     "只有4台可看",
     "只能看4台",
     "只剩4台",
-)
-
-TV_PAID_CANNOT_WATCH_TERMS = (
-    "已經繳費了",
-    "已經繳費完成",
-    "已繳費",
-    "已繳費完成",
-    "繳費完成",
-    "繳費了",
-    "繳費成功",
-    "付款成功",
-    "繳了",
-    "付費了",
-)
-
-TV_CANNOT_WATCH_TERMS = (
-    "不能看電視",
-    "電視還不能看",
-    "電視不能看",
-    "還是不能看",
-    "無法收看",
-    "不能收看",
-    "無法看電視",
-    "看不了電視",
-)
-
-NON_PROMOTED_1G_TERMS = (
-    "1G",
-    "1g",
-    "1 G",
-    "1 g",
-    "1G/1G",
-    "1g/1g",
 )
 
 APPLY_PLAN_TERMS = (
@@ -1872,34 +1453,6 @@ PROMOTION_APPLICATION_SERVICE_TERMS = (
     "100M",
 )
 
-TV_BLURRY_TERMS = (
-    "電視很不清",
-    "電視不清",
-    "畫面不清",
-    "畫質不清",
-    "畫面模糊",
-    "馬賽克",
-)
-
-TV_LAG_TERMS = (
-    "有畫面但是會lag",
-    "有畫面但是會LAG",
-    "有畫面會lag",
-    "有畫面會LAG",
-    "畫面會lag",
-    "畫面會LAG",
-    "電視會lag",
-    "電視會LAG",
-)
-
-REMOTE_POWER_LEARN_TERMS = (
-    "拷貝電源",
-    "學習電源",
-    "複製電源",
-    "遙控器拷貝",
-    "遙控器學習",
-)
-
 CONTRACT_LOOKUP_TERMS = (
     "查詢合約",
     "查合約",
@@ -1908,53 +1461,6 @@ CONTRACT_LOOKUP_TERMS = (
     "合約",
     "目前服務",
     "服務內容",
-)
-
-TV_TROUBLESHOOTING_NOT_RECONNECTION_TERMS = (
-    "電視故障",
-    "第四台故障",
-    "電視不能用",
-    "第四台不能用",
-    "電視跟網路都不能用",
-    "電視顯示未授權",
-    "授權到期",
-    "未授權",
-    "沒有授權",
-    "無授權",
-    "遙控器",
-    "遙控",
-    "不能轉台",
-)
-
-RECONNECTION_INTENT_TERMS = (
-    "復線",
-    "恢復",
-    "開通",
-    "已繳",
-    "繳費",
-    "欠費",
-    "斷訊",
-    "停訊",
-)
-
-SIGNAL_SOURCE_TERMS = (
-    "訊號源",
-    "輸入源",
-    "input",
-    "Input",
-    "INPUT",
-    "source",
-    "Source",
-    "SOURCE",
-    "hdmi",
-    "HDMI",
-)
-
-CANCEL_REPAIR_TERMS = (
-    "取消報修",
-    "取消派工",
-    "取消工單",
-    "取消維修",
 )
 
 MABOW_TERMS = (
@@ -2756,115 +2262,6 @@ VALUE_ADDED_PRODUCT_PRICE_TERMS = (
 )
 
 
-def detect_value_added_product_knowledge_query(text: str) -> Optional[Dict[str, Any]]:
-    """Route add-on product catalog questions to RAG before fault detection."""
-    value = normalize_text_width(text or "").strip()
-    compact = value.replace(" ", "").replace("　", "")
-    product_keys = detect_value_added_product_keys(value)
-    if not compact or not product_keys:
-        return None
-
-    has_info_intent = any(term in compact for term in VALUE_ADDED_PRODUCT_INFO_TERMS)
-    if not has_info_intent:
-        return None
-
-    has_fault = any(term.lower() in compact.lower() for term in VALUE_ADDED_PRODUCT_FAULT_TERMS)
-    has_price_intent = any(term in compact for term in VALUE_ADDED_PRODUCT_PRICE_TERMS)
-    if has_fault and not has_price_intent:
-        return None
-
-    aliases = value_added_query_aliases(value)
-    alias_query = " ".join(dict.fromkeys(aliases))
-    knowledge_query = (
-        f"{value} {alias_query} 加值服務 單品銷售 月租 半年繳 年繳 "
-        "費用 申辦方式 限制條件"
-    ).strip()
-    return build_knowledge_query_decision(
-        intent="value_added_product_query",
-        topic="加值產品與服務",
-        knowledge_query=knowledge_query,
-        reason="value_added_product_knowledge_rule",
-    )
-
-
-def detect_equipment_purchase_knowledge_query(text: str) -> Optional[Dict[str, Any]]:
-    """Keep an equipment purchase/price question out of the fault flow."""
-    value = normalize_text_width(text or "").strip()
-    compact = value.replace(" ", "").replace("　", "")
-    if not compact:
-        return None
-
-    has_subject = any(term in compact for term in ("遙控器", "語音遙控器", "機上盒", "數位機上盒"))
-    has_purchase = any(term in compact for term in ("買", "購買", "換一支", "更換", "申購", "加購"))
-    has_price = any(term in compact for term in ("多少錢", "多少", "價格", "價錢", "費用", "收費"))
-    if not (has_subject and has_purchase and has_price):
-        return None
-
-    return build_knowledge_query_decision(
-        intent="equipment_purchase_price_query",
-        topic="設備購買與費用",
-        knowledge_query=f"{value} 設備購買 售價 每支費用 申購方式",
-        reason="equipment_purchase_knowledge_rule",
-    )
-
-
-def detect_service_device_limit_knowledge_query(text: str) -> Optional[Dict[str, Any]]:
-    """Distinguish service device limits from television channel-number queries."""
-    value = normalize_text_width(text or "").strip()
-    if "service_device_limit" not in detect_query_facets(value):
-        return None
-
-    return build_knowledge_query_decision(
-        intent="service_device_limit_query",
-        topic="加值服務登入裝置限制",
-        knowledge_query=(
-            f"{value} LINE TV 登入裝置數量 裝置上限 同時觀看限制 使用規則"
-        ),
-        reason="service_device_limit_knowledge_rule",
-    )
-
-
-def detect_knowledge_entity_confirmation(text: str) -> Optional[Dict[str, Any]]:
-    """Ask before using a plausible but low-confidence indexed service name."""
-    value = normalize_text_width(text or "").strip()
-    compact = value.replace(" ", "").replace("　", "")
-    if not compact:
-        return None
-    if is_payment_method_query(value):
-        return None
-
-    suggestion = suggest_knowledge_entity(value)
-    if not suggestion:
-        return None
-
-    canonical_name = str(suggestion.get("name") or "").strip()
-    if not canonical_name:
-        return None
-
-    has_info_intent = any(term in compact for term in VALUE_ADDED_PRODUCT_INFO_TERMS)
-    is_short_entity_query = len(compact) <= len(canonical_name) + 4
-    if not has_info_intent and not is_short_entity_query:
-        return None
-
-    aliases = [canonical_name, *(suggestion.get("aliases") or [])]
-    alias_query = " ".join(dict.fromkeys(str(alias).strip() for alias in aliases if str(alias).strip()))
-    decision = build_clarify_decision(
-        intent="knowledge_entity_confirmation",
-        topic="加值產品與服務",
-        reply=f"請問您指的是「{canonical_name}」服務嗎？",
-        reason="knowledge_entity_confirmation_required",
-    )
-    decision["entity_confirmation"] = {
-        "name": canonical_name,
-        "original_query": value,
-        "knowledge_query": (
-            f"{canonical_name} {alias_query} 加值服務 單品銷售 月租 半年繳 年繳 "
-            "費用 申辦方式 限制條件"
-        ).strip(),
-    }
-    return decision
-
-
 def build_clarify_decision(
     intent: str,
     topic: str,
@@ -2975,28 +2372,6 @@ def build_service_availability_reply(text: str, memory: Dict[str, Any]) -> str:
     )
 
 
-def detect_service_availability_query(
-    text: str,
-    memory: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
-    text = (text or "").strip()
-    memory = memory or {}
-    known = memory.get("known_info", {})
-
-    if not text:
-        return None
-
-    if is_service_availability_query(text):
-        return build_direct_reply_decision(
-            intent="service_availability",
-            topic="服務範圍申辦查詢",
-            reply=build_service_availability_reply(text, memory),
-            reason="direct_service_availability_rule",
-        )
-
-    return None
-
-
 def normalize_mabow_query(text: str) -> str:
     value = (text or "").strip().replace("瑪柏", "瑪帛")
     if "瑪帛電話" in value and "瑪帛電視電話" not in value:
@@ -3029,26 +2404,6 @@ def build_mabow_knowledge_decision(text: str, reason: str) -> Dict[str, Any]:
         "extracted_slots": {},
         "reason": reason,
     })
-
-
-def detect_mabow_query(
-    text: str,
-    memory: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
-    text = (text or "").strip()
-    memory = memory or {}
-    known = memory.get("known_info", {})
-
-    if not text:
-        return None
-
-    if memory.get("pending_tool") or known.get("troubleshooting_started") == "yes":
-        return None
-
-    if any(term in text for term in MABOW_TERMS):
-        return build_mabow_knowledge_decision(text, "mabow_knowledge_rule")
-
-    return None
 
 
 def is_period_or_occasion_promotion_query(text: str) -> bool:
@@ -4151,7 +3506,12 @@ def is_value_added_service_followup_query(text: str, memory: Optional[Dict[str, 
 
 def infer_recent_campaign_topic(memory: Optional[Dict[str, Any]] = None) -> Optional[str]:
     memory = memory or {}
-    remembered_topic = str(memory.get("last_campaign_topic") or "")
+    known = memory.get("known_info") if isinstance(memory.get("known_info"), dict) else {}
+    remembered_topic = str(
+        memory.get("last_campaign_topic")
+        or known.get("last_campaign_topic")
+        or ""
+    )
     if remembered_topic.strip():
         return remembered_topic.strip()
 
@@ -4554,1673 +3914,6 @@ def detect_fixed_ip_knowledge_query(
             topic="固定 IP",
             knowledge_query=value,
             reason="fixed_ip_knowledge_rule",
-        )
-
-    return None
-
-
-def detect_safe_direct_reply(
-    text: str,
-    memory: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
-    text = (text or "").strip()
-    memory = memory or {}
-    known = memory.get("known_info", {})
-
-    if not text:
-        return None
-
-    compact = text.replace(" ", "").replace("　", "")
-    if compact in {"2", "２", "第二個", "第2個", "選2"} and (
-        known.get("last_value_added_topic") == "WiFi 加值服務"
-        or memory.get("last_value_added_topic") == "WiFi 加值服務"
-    ):
-        return build_direct_reply_decision(
-            intent="wifi_value_added_service",
-            topic="WiFi 加值服務",
-            reply=WIFI_VALUE_ADDED_SERVICE_REPLY,
-            reason="direct_remembered_value_added_option_2_wifi_rule",
-        )
-
-    if is_virtual_hosting_query(text):
-        return build_direct_reply_decision(
-            intent="unsupported_virtual_hosting_service",
-            topic="虛擬主機",
-            reply=VIRTUAL_HOSTING_UNSUPPORTED_REPLY,
-            reason="direct_virtual_hosting_unsupported_rule",
-        )
-
-    if "pppoe" in compact.lower():
-        return build_direct_reply_decision(
-            intent="dhcp_not_pppoe",
-            topic="PPPoE 網路設定",
-            reply=DHCP_NOT_PPPOE_REPLY,
-            reason="direct_dhcp_not_pppoe_rule",
-        )
-
-    if (
-        any(term in compact.lower() for term in ("網際網路連線類型", "網際網路連線方式", "網路連線類型", "網路連線方式", "isp連線"))
-    ):
-        return build_direct_reply_decision(
-            intent="dhcp_connection_type",
-            topic="網際網路連線類型",
-            reply="本公司網際網路連線採用 DHCP 自動取得 IP，由系統自動動態發放 IP 位址，客戶端無需手動設定固定 IP。",
-            reason="direct_dhcp_connection_type_rule",
-        )
-
-    if (
-        any(term in compact.lower() for term in ("wifi", "wi-fi", "分享器", "路由器"))
-        and any(term in compact for term in ("重新設定", "重設", "設定"))
-    ):
-        return build_direct_reply_decision(
-            intent="wifi_router_setup_guidance",
-            topic="Wi-Fi 分享器設定",
-            reply=WIFI_ROUTER_SETUP_REPLY,
-            reason="direct_wifi_router_setup_guidance_rule",
-        )
-
-    if (
-        memory.get("company_code") == "wctv"
-        and "固定ip" in compact.lower()
-        and any(term in compact for term in ("綁定", "設定", "怎麼", "如何", "步驟", "方式"))
-    ):
-        return build_direct_reply_decision(
-            intent="wctv_fixed_ip_binding",
-            topic="固定 IP 綁定",
-            reply=WCTV_FIXED_IP_BINDING_REPLY,
-            reason="direct_wctv_fixed_ip_binding_rule",
-        )
-
-    if is_network_line_ownership_query(text):
-        return build_direct_reply_decision(
-            intent="network_line_ownership",
-            topic="網路獨立或共用",
-            reply=NETWORK_LINE_OWNERSHIP_REPLY,
-            reason="direct_network_line_ownership_rule",
-        )
-
-    if is_app_convenience_store_barcode_query(text):
-        return build_direct_reply_decision(
-            intent="app_convenience_store_barcode",
-            topic="APP 超商繳費條碼",
-            reply=APP_CONVENIENCE_BARCODE_REPLY,
-            reason="direct_app_convenience_store_barcode_rule",
-        )
-
-    if is_convenience_store_payment_failed_query(text):
-        return build_direct_reply_decision(
-            intent="convenience_store_payment_failed",
-            topic="便利商店繳費失敗",
-            reply=CONVENIENCE_STORE_PAYMENT_FAILED_REPLY,
-            reason="direct_convenience_store_payment_failed_rule",
-        )
-
-    if is_basic_vs_digital_channel_query(text):
-        return build_direct_reply_decision(
-            intent="basic_vs_digital_channel",
-            topic="基本頻道與數位頻道",
-            reply=BASIC_VS_DIGITAL_CHANNEL_REPLY,
-            reason="direct_basic_vs_digital_channel_rule",
-        )
-
-    if is_outbound_call_lookup_query(text):
-        return build_direct_reply_decision(
-            intent="outbound_call_lookup_handoff",
-            topic="客服來電確認",
-            reply=OUTBOUND_CALL_LOOKUP_REPLY,
-            reason="direct_outbound_call_lookup_rule",
-        )
-
-    if is_bare_line_tv_topic_query(text):
-        return build_clarify_decision(
-            intent="line_tv_topic_clarification",
-            topic="LINE TV",
-            reply=LINE_TV_TOPIC_CLARIFY_REPLY,
-            reason="direct_line_tv_topic_clarification_rule",
-        )
-
-    if is_stb_tutorial_stuck_query(text):
-        return build_direct_reply_decision(
-            intent="stb_tutorial_stuck",
-            topic="機上盒教學畫面卡住",
-            reply=STB_TUTORIAL_STUCK_REPLY,
-            reason="direct_stb_tutorial_stuck_rule",
-        )
-
-    if is_address_service_plan_lookup_query(text):
-        return build_direct_reply_decision(
-            intent="address_service_plan_lookup_handoff",
-            topic="依地址查詢網路速率",
-            reply=ADDRESS_SERVICE_PLAN_LOOKUP_REPLY,
-            reason="direct_address_service_plan_lookup_rule",
-        )
-
-    if is_contract_change_or_plan_switch_query(text):
-        return build_direct_reply_decision(
-            intent="contract_change_guidance",
-            topic="換約或轉換方案",
-            reply=CONTRACT_CHANGE_REPLY,
-            reason="direct_contract_change_guidance_rule",
-        )
-
-    if is_generic_fee_lookup_query(text):
-        return build_clarify_decision(
-            intent="generic_fee_lookup_clarification",
-            topic="費用查詢",
-            reply=GENERIC_FEE_LOOKUP_CLARIFY_REPLY,
-            reason="direct_generic_fee_lookup_clarification_rule",
-        )
-
-    if is_personal_monthly_fee_clarify_query(text):
-        return build_clarify_decision(
-            intent="personal_monthly_fee_clarify",
-            topic="月租查詢類型",
-            reply="請問您是想查詢目前待繳帳單金額，還是查詢目前合約／服務內容？",
-            reason="direct_personal_monthly_fee_clarify_rule",
-        )
-
-    if is_next_tier_plan_fee_query(text):
-        return build_knowledge_query_decision(
-            intent="next_tier_plan_fee_guidance",
-            topic="升級高一階費用",
-            knowledge_query=(
-                f"{text} 目前可推廣寬頻方案 電視加網路方案 升級費用 合約期間"
-            ),
-            reason="next_tier_plan_fee_knowledge_rule",
-        )
-
-    if is_tv_only_promotion_query(text):
-        return build_knowledge_query_decision(
-            intent="pure_tv_promotion_query",
-            topic="單辦有線電視優惠",
-            knowledge_query=f"{PURE_TV_INSTALL_KNOWLEDGE_QUERY} {text}",
-            reason="direct_tv_only_promotion_knowledge_rule",
-        )
-
-    if is_ambiguous_signal_instability_query(text):
-        return build_clarify_decision(
-            intent="signal_instability_service_clarification",
-            topic="訊號不穩",
-            reply="請問您反映的是電視訊號不穩，還是網路訊號不好？我會依您使用的服務帶您進行對應的故障排除。",
-            reason="clarify_ambiguous_signal_instability_rule",
-        )
-
-    if is_tv_signal_instability_repair_query(text):
-        return build_tool_action_decision(
-            intent="tv_signal_instability_repair",
-            tool_name="create_repair_ticket",
-            topic="電視訊號不穩維修申告",
-            reply="了解，網路可正常使用但電視訊號持續不穩，將協助您進入維修申告流程安排檢查。",
-            reason="direct_tv_signal_instability_repair_rule",
-        )
-
-    if is_network_signal_instability_query(text):
-        return build_troubleshooting_decision(
-            text,
-            "direct_network_signal_instability_rule",
-        )
-
-    if is_network_outage_instability_query(text):
-        return build_direct_reply_decision(
-            intent="network_outage_instability_check",
-            topic="網路不穩與區域故障",
-            reply=build_network_outage_instability_reply(memory),
-            reason="direct_network_outage_instability_rule",
-        )
-
-    if is_network_intermittent_fault_query(text):
-        return build_troubleshooting_decision(
-            text,
-            "direct_network_intermittent_fault_rule",
-        )
-
-    if is_network_instability_short_query(text):
-        return build_direct_reply_decision(
-            intent="network_instability_scope_clarification",
-            topic="網路連線不順",
-            reply=NETWORK_SCOPE_CLARIFY_REPLY,
-            reason="direct_network_instability_short_rule",
-        )
-
-    if is_line_tv_opening_query(text):
-        return build_direct_reply_decision(
-            intent="line_tv_opening_query",
-            topic="LINE TV 開通與登入",
-            reply=LINE_TV_OPENING_REPLY,
-            reason="direct_line_tv_opening_reply_rule",
-        )
-
-    if text.replace(" ", "").replace("　", "") in {"不想看了", "不看了", "不要看了"}:
-        return build_clarify_decision(
-            intent="stop_watching_clarify",
-            topic="退租或暫停收看",
-            reply=STOP_WATCHING_CLARIFY_REPLY,
-            reason="direct_stop_watching_clarify_rule",
-        )
-
-    if (
-        memory.get("company_code") == "wctv"
-        and is_new_network_equipment_registration_query(text)
-    ):
-        return build_direct_reply_decision(
-            intent="wctv_new_network_equipment_registration",
-            topic="更換設備後網路註冊",
-            reply=WCTV_NEW_NETWORK_EQUIPMENT_REPLY,
-            reason="direct_wctv_new_network_equipment_registration_rule",
-        )
-
-    if is_router_replacement_query(text):
-        return build_direct_reply_decision(
-            intent="router_replacement_clarify",
-            topic="更換分享器",
-            reply=ROUTER_REPLACEMENT_CLARIFY_REPLY,
-            reason="direct_router_replacement_clarify_rule",
-        )
-
-    if is_ds_light_blinking_query(text):
-        return build_direct_reply_decision(
-            intent="ds_light_blinking",
-            topic="數據機 DS 燈閃爍",
-            reply=DS_LIGHT_BLINKING_REPLY,
-            reason="direct_ds_light_blinking_rule",
-        )
-
-    if is_general_channel_e004_query(text):
-        return build_clarify_decision(
-            intent="general_channel_e004_temp_restore_clarify",
-            topic="一般頻道 E004",
-            reply=GENERAL_CHANNEL_E004_REPLY,
-            reason="direct_general_channel_e004_temp_restore_clarify_rule",
-        )
-
-    if (
-        any(term in text for term in ("授權過期", "E004", "未授權", "無授權"))
-        and str(memory.get("company_code") or memory.get("tv_cable") or "").lower() == "cnt"
-        and str(known.get("custnum") or memory.get("custnum") or "") == "609741"
-    ):
-        return build_direct_reply_decision(
-            intent="cnt_seasonal_authorization_paid",
-            topic="中投季繳授權與 HBO 優惠",
-            reply=CNT_SEASONAL_AUTHORIZATION_REPLY,
-            reason="direct_cnt_seasonal_authorization_paid_rule",
-        )
-
-    if is_online_payment_done_followup(text):
-        return build_direct_reply_decision(
-            intent="online_payment_done_activation",
-            topic="線上繳費後開通",
-            reply=ONLINE_PAYMENT_DONE_REPLY,
-            reason="direct_online_payment_done_rule",
-        )
-
-    if is_app_payment_receipt_query(text):
-        return build_direct_reply_decision(
-            intent="app_payment_receipt_lookup",
-            topic="APP 線上繳費收據與發票查詢",
-            reply=APP_PAYMENT_RECEIPT_REPLY,
-            reason="direct_app_payment_receipt_rule",
-        )
-
-    if is_cloud_account_app_usage_query(text):
-        return build_direct_reply_decision(
-            intent="cloud_account_app_usage",
-            topic="雲端帳號與行動客服 APP",
-            reply=CLOUD_ACCOUNT_APP_GUIDE_REPLY,
-            reason="direct_cloud_account_app_usage_rule",
-        )
-
-    if is_tv_no_program_query(text):
-        return build_direct_reply_decision(
-            intent="tv_no_program_clarify",
-            topic="電視沒有節目",
-            reply=TV_NO_PROGRAM_CLARIFY_REPLY,
-            reason="direct_tv_no_program_clarify_rule",
-        )
-
-    if is_half_year_online_payment_query(text):
-        return build_direct_reply_decision(
-            intent="half_year_online_payment",
-            topic="半年繳與線上繳費",
-            reply=HALF_YEAR_ONLINE_PAYMENT_REPLY,
-            reason="direct_half_year_online_payment_rule",
-        )
-
-    if is_member_registration_query(text):
-        return build_direct_reply_decision(
-            intent="member_registration_policy",
-            topic="會員與用戶編號",
-            reply=MEMBER_REGISTRATION_REPLY,
-            reason="direct_member_registration_rule",
-        )
-
-    if is_set_top_box_relocation_payment_query(text):
-        return build_direct_reply_decision(
-            intent="set_top_box_relocation_payment",
-            topic="機上盒移機付款方式",
-            reply=SET_TOP_BOX_RELOCATION_PAYMENT_REPLY,
-            reason="direct_set_top_box_relocation_payment_rule",
-        )
-
-    if (
-        is_rebooted_all_channel_unavailable_query(text)
-        and known.get("troubleshooting_started") != "yes"
-        and known.get("_previous_troubleshooting_started") != "yes"
-    ):
-        return build_direct_reply_decision(
-            intent="tv_all_channels_unavailable_after_reboot",
-            topic="全部頻道無法收視",
-            reply=ALL_CHANNELS_REBOOTED_REPLY,
-            reason="direct_tv_all_channels_unavailable_after_reboot_rule",
-        )
-
-    if is_tv_safe_mode_query(text):
-        return build_direct_reply_decision(
-            intent="tv_safe_mode_recovery",
-            topic="電視安全模式",
-            reply=TV_SAFE_MODE_REPLY,
-            reason="direct_tv_safe_mode_recovery_rule",
-        )
-
-    if is_wifi_router_password_query(text):
-        return build_direct_reply_decision(
-            intent="wifi_router_password_help",
-            topic="WiFi 分享器密碼",
-            reply=WIFI_ROUTER_PASSWORD_REPLY,
-            reason="direct_wifi_router_password_rule",
-        )
-
-    if is_wireless_network_acquisition_query(text):
-        return build_clarify_decision(
-            intent="wireless_network_acquisition_clarify",
-            topic="無線網路申請",
-            reply=WIRELESS_NETWORK_CLARIFY_REPLY,
-            reason="direct_wireless_network_acquisition_clarify_rule",
-        )
-
-    if is_prepay_lookup_query(text):
-        return build_direct_reply_decision(
-            intent="prepay_bill_lookup",
-            topic="預繳與待繳帳單",
-            reply=PREPAY_LOOKUP_REPLY,
-            reason="direct_prepay_lookup_rule",
-        )
-
-    if is_connected_stb_youtube_query(text):
-        return build_direct_reply_decision(
-            intent="connected_stb_youtube",
-            topic="聯網機上盒 YouTube",
-            reply=CONNECTED_STB_YOUTUBE_REPLY,
-            reason="direct_connected_stb_youtube_rule",
-        )
-
-    normalized_text = re.sub(r"\s+", "", text)
-    if (
-        any(term in normalized_text for term in ("機上盒", "電視畫面", "頻道畫面"))
-        and "密碼" in normalized_text
-        and any(term in normalized_text for term in ("輸入", "要求", "出現", "跳出", "顯示", "要我"))
-    ):
-        return build_direct_reply_decision(
-            intent="tv_password_prompt",
-            topic="機上盒畫面要求輸入密碼",
-            reply=TV_PASSWORD_PROMPT_REPLY,
-            reason="direct_tv_password_prompt_rule",
-        )
-
-    if (
-        any(term in normalized_text for term in ("更換用戶", "變更用戶", "換用戶", "過戶", "更名"))
-        and any(term in normalized_text for term in ("第四台", "有線電視", "光纖", "網路", "寬頻"))
-    ):
-        return build_direct_reply_decision(
-            intent="service_account_transfer",
-            topic="第四台與光纖服務過戶／更名",
-            reply=SERVICE_ACCOUNT_TRANSFER_REPLY,
-            reason="direct_service_account_transfer_rule",
-        )
-
-    if is_broadband_unlimited_query(text):
-        return build_direct_reply_decision(
-            intent="broadband_unlimited_usage",
-            topic="寬頻流量限制",
-            reply=BROADBAND_UNLIMITED_REPLY,
-            reason="direct_broadband_unlimited_rule",
-        )
-
-    if is_identity_document_upload_query(text):
-        return build_direct_reply_decision(
-            intent="identity_document_upload",
-            topic="身分證件補件與上傳",
-            reply=IDENTITY_DOCUMENT_UPLOAD_REPLY,
-            reason="direct_identity_document_upload_rule",
-        )
-
-    if is_area_repair_status_query(text):
-        return build_direct_reply_decision(
-            intent="area_repair_status_lookup",
-            topic="維修進度確認",
-            reply=build_area_repair_status_reply(memory, text),
-            reason="direct_area_repair_status_rule",
-        )
-
-    if is_contract_lookup_with_explicit_address(text):
-        return build_direct_reply_decision(
-            intent="address_contract_lookup_handoff",
-            topic="指定地址合約查詢",
-            reply=ADDRESS_CONTRACT_LOOKUP_REPLY,
-            reason="direct_address_contract_lookup_rule",
-        )
-
-    if is_personal_billing_address_query(text):
-        return build_direct_reply_decision(
-            intent="personal_billing_address_handoff",
-            topic="帳單寄送地址查詢",
-            reply=PERSONAL_BILLING_ADDRESS_REPLY,
-            reason="direct_personal_billing_address_rule",
-        )
-
-    if is_contract_termination_request(text):
-        return build_direct_reply_decision(
-            intent="contract_termination_guidance",
-            topic="合約終止與退租",
-            reply=SERVICE_TERMINATION_WITH_CONTRACT_REPLY,
-            reason="direct_contract_termination_rule",
-        )
-
-    if is_price_complaint_query(text):
-        return build_direct_reply_decision(
-            intent="price_complaint",
-            topic="費用疑問",
-            reply=PRICE_COMPLAINT_REPLY,
-            reason="direct_price_complaint_rule",
-        )
-
-    if is_sms_bill_registered_phone_policy_query(text, memory):
-        return build_direct_reply_decision(
-            intent="sms_bill_registered_phone_policy",
-            topic="簡訊帳單登記電話",
-            reply=SMS_BILL_REGISTERED_PHONE_REPLY,
-            reason="direct_sms_bill_registered_phone_policy_rule",
-        )
-
-    if is_personal_contact_phone_change_query(text):
-        return build_direct_reply_decision(
-            intent="human_handoff_request",
-            topic="變更聯絡電話",
-            reply=WEB_HUMAN_HANDOFF_REPLY,
-            reason="direct_personal_contact_phone_change_rule",
-        )
-
-    if is_speed_test_how_to_query(text):
-        return build_direct_reply_decision(
-            intent="speed_test_guide",
-            topic="網路測速方式",
-            reply=SPEED_TEST_GUIDE_REPLY,
-            reason="direct_speed_test_guide_rule",
-        )
-
-    if is_triple_play_bill_item_query(text):
-        return build_direct_reply_decision(
-            intent="triple_play_bill_item_explanation",
-            topic="三合一帳單項目",
-            reply=TRIPLE_PLAY_BILL_ITEM_REPLY,
-            reason="direct_triple_play_bill_item_rule",
-        )
-
-    if is_online_payment_activation_query(text):
-        return build_direct_reply_decision(
-            intent="online_payment_activation",
-            topic="線上繳費與自動開通",
-            reply=ONLINE_PAYMENT_ACTIVATION_REPLY,
-            reason="direct_online_payment_activation_rule",
-        )
-
-    if is_online_payment_physical_receipt_query(text):
-        return build_direct_reply_decision(
-            intent="online_payment_receipt_query",
-            topic="線上繳費收據與發票",
-            reply=ONLINE_PAYMENT_RECEIPT_REPLY,
-            reason="direct_online_payment_receipt_rule",
-        )
-
-    if is_paid_but_bill_still_visible_query(text):
-        return build_direct_reply_decision(
-            intent="store_payment_still_billed",
-            topic="超商繳費入帳確認",
-            reply=get_policy_text(
-                memory,
-                "billing.store_payment_still_billed",
-                "reply",
-                STORE_PAYMENT_STILL_BILLED_REPLY,
-            ),
-            reason="direct_store_payment_still_billed_rule",
-        )
-
-    if is_payment_not_posted_query(text):
-        return build_direct_reply_decision(
-            intent="payment_not_posted",
-            topic="繳費未沖帳",
-            reply=get_policy_text(
-                memory,
-                "billing.payment_not_posted",
-                "reply",
-                PAYMENT_NOT_POSTED_REPLY,
-            ),
-            reason="direct_payment_not_posted_rule",
-        )
-
-    if is_past_payment_or_posting_record_query(text):
-        return build_direct_reply_decision(
-            intent="past_payment_record_lookup",
-            topic="已繳費明細與入帳紀錄",
-            reply=get_policy_text(
-                memory,
-                "billing.past_payment_record",
-                "reply",
-                PAST_PAYMENT_RECORD_REPLY,
-            ),
-            reason="direct_past_payment_record_rule",
-        )
-
-    if is_next_bill_followup_query(text):
-        return build_direct_reply_decision(
-            intent="next_bill_after_no_unpaid",
-            topic="下期帳單",
-            reply=get_policy_text(
-                memory,
-                "billing.next_bill_after_no_unpaid",
-                "reply",
-                NEXT_BILL_AFTER_NO_UNPAID_REPLY,
-            ),
-            reason="direct_next_bill_after_no_unpaid_rule",
-        )
-
-    if is_bill_amount_difference_query(text):
-        return build_direct_reply_decision(
-            intent="bill_amount_difference_lookup",
-            topic="本期與上期帳單差異",
-            reply=BILL_AMOUNT_DIFFERENCE_REPLY,
-            reason="direct_bill_amount_difference_rule",
-        )
-
-    if is_unsupported_bill_detail_query(text):
-        return build_direct_reply_decision(
-            intent="unsupported_bill_detail_lookup",
-            topic="帳單期間與起訖日",
-            reply=UNSUPPORTED_BILL_DETAIL_REPLY,
-            reason="direct_unsupported_bill_detail_rule",
-        )
-
-    if is_bill_payment_deadline_query(text):
-        return build_direct_reply_decision(
-            intent="bill_payment_deadline_lookup",
-            topic="帳單繳費期限",
-            reply=(
-                "目前可協助查詢本期待繳金額與已繳費迄日，但無法查詢帳單繳費截止日期。\n"
-                "請以最新一期帳單標示的繳費期限為準；若帳單遺失或仍需確認期限，請由真人客服協助查詢。"
-            ),
-            reason="direct_bill_payment_deadline_rule",
-        )
-
-    if is_bill_content_query(text):
-        return build_bill_content_query_decision("direct_bill_content_query_rule")
-
-    if is_tv_600_fee_clarify_query(text):
-        return build_direct_reply_decision(
-            intent="tv_600_fee_clarify",
-            topic="有線電視 $600 月費釐清",
-            reply=TV_600_FEE_CLARIFY_REPLY,
-            reason="direct_tv_600_fee_clarify_rule",
-        )
-
-    if is_monthly_fee_after_contract_lookup_query(text, memory):
-        return build_direct_reply_decision(
-            intent="monthly_fee_after_contract_lookup",
-            topic="已繳費明細與入帳紀錄",
-            reply=PAST_PAYMENT_RECORD_REPLY,
-            reason="direct_monthly_fee_after_contract_lookup_rule",
-        )
-
-    if is_personal_service_fee_lookup_query(text):
-        return build_tool_action_decision(
-            intent="service_content_query",
-            tool_name="search_contract_info",
-            topic="目前服務費用查詢",
-            reply="可以，我幫您查詢目前服務內容與合約資訊。",
-            reason="direct_personal_service_fee_lookup_rule",
-        )
-
-    if is_restricted_channel_purchase_query(text):
-        return build_knowledge_query_decision(
-            intent="restricted_channel_purchase",
-            topic="限制級頻道購買",
-            knowledge_query=(
-                "限制級 成人頻道 成人節目 授權到期 購買 加購 訂購 價格 元 "
-                "聯網機上盒 VIP會員 優惠專區 數位電視 客服"
-            ),
-            reason="direct_restricted_channel_purchase_knowledge_rule",
-        )
-
-    if is_invoice_carrier_query(text):
-        return build_direct_reply_decision(
-            intent="invoice_carrier_binding",
-            topic="發票載具歸戶",
-            reply=build_invoice_carrier_reply_for_query(text),
-            reason="direct_invoice_carrier_knowledge_rule",
-        )
-
-    if is_refund_calculation_query(text):
-        return build_direct_reply_decision(
-            intent="service_refund_calculation",
-            topic="解約退費確認",
-            reply=REFUND_CALCULATION_REPLY,
-            reason="direct_service_refund_calculation_rule",
-        )
-
-    if is_points_usage_query(text):
-        return build_knowledge_query_decision(
-            intent="points_usage_query",
-            topic="哈POINT 紅利點數使用方式",
-            knowledge_query=(
-                f"{text} 哈POINT 哈 Point 紅利點數 使用方式 用途 "
-                "購買台數科商品 抵扣各項服務費用 兌換商品"
-            ),
-            reason="direct_points_usage_knowledge_rule",
-        )
-
-    if is_points_overview_query(text):
-        return build_knowledge_query_decision(
-            intent="points_overview_query",
-            topic="哈POINT 紅利點數說明",
-            knowledge_query=(
-                f"{text} 台數科紅利點數哈Point說明 "
-                "紅利點數哈Point優惠積點回饋機制 如何獲得 有效期限"
-            ),
-            reason="direct_points_overview_knowledge_rule",
-        )
-
-    if is_overdue_disconnection_query(text):
-        return build_direct_reply_decision(
-            intent="overdue_disconnection_guidance",
-            topic="欠費斷訊與復線",
-            reply=OVERDUE_DISCONNECTION_REPLY,
-            reason="direct_overdue_disconnection_guidance_rule",
-        )
-
-    if is_restore_before_payment_request(text):
-        return build_clarify_decision(
-            intent="overdue_reconnection_service_clarify",
-            topic="復線服務類型",
-            reply="請問您要恢復的是「網路」還是「電視」服務？",
-            reason="restore_before_payment_service_type_clarify_rule",
-        )
-
-    if is_card_autopay_definition_query(text):
-        return build_direct_reply_decision(
-            intent="card_autopay_definition",
-            topic="循環扣款說明",
-            reply=CARD_AUTOPAY_DEFINITION_REPLY,
-            reason="direct_card_autopay_definition_rule",
-        )
-
-    if is_card_autopay_binding_status_query(text):
-        return build_direct_reply_decision(
-            intent="card_autopay_binding_status_handoff",
-            topic="信用卡扣繳綁定確認",
-            reply=CARD_AUTOPAY_BINDING_STATUS_REPLY,
-            reason="direct_card_autopay_binding_status_handoff_rule",
-        )
-
-    if is_card_autopay_application_query(text):
-        return build_direct_reply_decision(
-            intent="card_autopay_application",
-            topic="信用卡自動扣款申請方式",
-            reply=CARD_AUTOPAY_APPLICATION_REPLY,
-            reason="direct_card_autopay_application_rule",
-        )
-
-    if is_online_payment_account_help_query(text):
-        return build_direct_reply_decision(
-            intent="online_payment_account_help",
-            topic="線上繳費帳號協助",
-            reply=(
-                "用戶編號可在紙本帳單、簡訊帳單，或哈TV行動客服 APP 的帳務資料中找到。\n"
-                "若已註冊但忘記密碼，請在 APP 或官網登入頁選擇「忘記密碼」，"
-                "依登記手機號碼接收簡訊驗證碼後重設。\n"
-                "若尚未註冊、收不到驗證簡訊或無法確認用戶編號，請由真人客服協助核對。"
-            ),
-            reason="direct_online_payment_account_help_rule",
-        )
-
-    if is_basic_channel_table_query(text):
-        return build_direct_reply_decision(
-            intent="basic_channel_table_query",
-            topic="基本頻道表",
-            reply=BASIC_CHANNEL_TABLE_REPLY,
-            reason="direct_basic_channel_table_rule",
-        )
-
-    if is_line_tv_opening_query(text):
-        return build_knowledge_query_decision(
-            intent="line_tv_opening_query",
-            topic="LINE TV 開通與登入",
-            knowledge_query=f"{LINE_TV_OPENING_QUERY} {text}",
-            reason="direct_line_tv_opening_knowledge_rule",
-        )
-
-    if is_mobile_casting_query(text):
-        return build_direct_reply_decision(
-            intent="mobile_casting_tv",
-            topic="手機投影電視",
-            reply=MOBILE_CASTING_REPLY,
-            reason="direct_mobile_casting_rule",
-        )
-
-    if is_online_payment_app_password_query(text):
-        return build_direct_reply_decision(
-            intent="online_payment_app_password_policy",
-            topic="線上繳費與 APP 帳密",
-            reply=ONLINE_PAYMENT_APP_PASSWORD_REPLY,
-            reason="direct_online_payment_app_password_rule",
-        )
-
-    if (
-        any(term in text for term in TV_PAID_CANNOT_WATCH_TERMS)
-        and any(term in text for term in TV_CANNOT_WATCH_TERMS + ("開通", "恢復", "復線"))
-    ):
-        return build_tool_action_decision(
-            intent="payment_receipt_reconnection",
-            tool_name="payment_bill_batch",
-            topic="超商收據復線",
-            reply="可以，我幫您確認超商繳費收據並處理復線。請上傳超商繳費收據圖片，我會辨識收據上的三段條碼。",
-            reason="direct_paid_tv_payment_receipt_reconnection_rule",
-        )
-
-    # A precise payment-method question is a new request and must not be
-    # swallowed by stale account-query or troubleshooting state.
-    if is_credit_card_payment_method_query(text):
-        return build_direct_reply_decision(
-            intent="credit_card_payment_methods",
-            topic="信用卡繳費",
-            reply=CARD_PAYMENT_METHOD_REPLY,
-            reason="direct_credit_card_payment_method_rule",
-        )
-
-    if is_convenience_store_payment_machine_query(text):
-        return build_knowledge_query_decision(
-            intent="convenience_store_payment_machine_guide",
-            topic="超商繳費機操作",
-            knowledge_query="IBON FAMIPORT ibon famiport 超商繳費機 便利商店機台 繳費教學 操作流程 7-Eleven 全家",
-            reason="direct_convenience_store_payment_machine_guide_rule",
-        )
-
-    if is_payment_method_query(text):
-        return build_direct_reply_decision(
-            intent="bill_payment_methods",
-            topic="繳費方式",
-            reply=PAYMENT_METHOD_REPLY,
-            reason="direct_payment_method_query_rule",
-        )
-
-    if any(term in text for term in BILL_LOST_OR_PAYMENT_TERMS):
-        return build_direct_reply_decision(
-            intent="bill_payment_methods",
-            topic="帳單遺失與繳費方式",
-            reply=(
-                "帳單不見或沒收到時，仍可用多種方式繳費：可至 7-11 ibon 或全家 FamiPort 依指示繳費，"
-                "也可用官網線上繳費、哈TV行動客服 APP，或到公司櫃台繳費。"
-                "若需要補發簡訊帳單，再提供戶名與聯絡電話由客服協助。"
-            ),
-            reason="direct_bill_lost_payment_methods_rule",
-        )
-
-    if any(term in text for term in APP_BILL_GUIDE_TERMS):
-        return build_direct_reply_decision(
-            intent="app_bill_guide",
-            topic="哈TV行動客服 APP 查帳單",
-            reply=(
-                "您可以用哈TV行動客服 APP 查詢帳單：先下載並登入 APP，"
-                "進入帳務或我的資訊相關選單，再點選帳單查詢或帳單歷史。"
-                "若登入後查不到資料，請確認帳號是否已綁定正確用戶資料，或由客服協助身分核對。"
-            ),
-            reason="direct_app_bill_guide_rule",
-        )
-
-    if any(term in text for term in PASSWORD_TERMS):
-        return build_direct_reply_decision(
-            intent="password_help",
-            topic="忘記密碼",
-            reply=(
-                "如果是哈TV行動客服或會員帳號忘記密碼，請先使用登入頁面的「忘記密碼」流程重設。"
-                "若無法完成重設，建議由客服協助身分核對後處理；請不要在公開對話中提供完整密碼或敏感資料。"
-            ),
-            reason="direct_password_rule",
-        )
-
-    company_info_interrupt = detect_company_info_interrupt_query(text, memory)
-    if company_info_interrupt:
-        return company_info_interrupt
-
-    service_availability = detect_service_availability_query(text, memory)
-    if service_availability:
-        return service_availability
-
-    if memory.get("pending_tool") or known.get("troubleshooting_started") == "yes":
-        return None
-
-    if (
-        known.get("tv_reactivation_status") == "already_temp_restored"
-        and any(
-            term in text
-            for term in TV_CANNOT_WATCH_TERMS + (
-                "不可以看電視",
-                "電視還是不可以看",
-                "還是不可以看",
-            )
-        )
-    ):
-        return build_direct_reply_decision(
-            intent="tv_reactivation_already_temp_restored_followup",
-            topic="已暫復後仍無法收看",
-            reply=(
-                "系統顯示已做過暫時復線，無法重複暫復。\n"
-                "請先將機上盒電源關閉約 10 秒後重新開機，等待 2 到 3 分鐘再切換頻道測試。\n"
-                "若仍無法收看，請由真人客服協助核對帳務入帳與收視授權狀態。"
-            ),
-            reason="direct_tv_reactivation_already_temp_restored_followup_rule",
-        )
-
-    if any(term in text for term in TV_AUTHORIZATION_TERMS):
-        return build_direct_reply_decision(
-            intent="tv_authorization_payment_check",
-            topic="電視授權到期與繳費確認",
-            reply=TV_AUTHORIZATION_PAYMENT_REPLY,
-            reason="direct_tv_authorization_payment_rule",
-        )
-
-    if any(term in text for term in REPAIR_SERVICE_HOUR_TERMS):
-        return build_direct_reply_decision(
-            intent="company_repair_service_hours",
-            topic="電話報修客服時間",
-            reply=(
-                "電話報修客服與智能 AI 服務為 24 小時服務。\n"
-                "若需要報修，您可以直接描述故障狀況，或使用維修申告管道；"
-                "公司櫃台營業時間僅適用於臨櫃辦理。"
-            ),
-            reason="direct_repair_service_24h_rule",
-        )
-
-    if (
-        any(term in text for term in TV_PAID_CANNOT_WATCH_TERMS)
-        and any(term in text for term in TV_CANNOT_WATCH_TERMS)
-    ):
-        return build_tool_action_decision(
-            intent="payment_receipt_reconnection",
-            tool_name="payment_bill_batch",
-            topic="超商收據復線",
-            reply="可以，我幫您確認超商繳費收據並處理復線。請上傳超商繳費收據圖片，我會辨識收據上的三段條碼。",
-            reason="direct_paid_tv_payment_receipt_reconnection_rule",
-        )
-
-    if (
-        any(term in text for term in NON_PROMOTED_1G_TERMS)
-        and any(term in text for term in APPLY_PLAN_TERMS)
-        and any(term in text for term in ["網路", "寬頻", "方案"])
-    ):
-        return build_direct_reply_decision(
-            intent="non_promoted_1g_plan",
-            topic="1G 非主推網路方案",
-            reply=get_policy_text(
-                memory,
-                "promotion.non_promoted_1g_plan",
-                "reply",
-                (
-                    "您好！1G 非主推網路方案，實際申辦資格及服務條件需依安裝地點及設備條件確認。"
-                    "若您有申辦需求，我們將安排專人為您進一步說明與協助。"
-                ),
-            ),
-            reason="direct_non_promoted_1g_plan_rule",
-        )
-
-    if is_promotion_application_request(text):
-        return build_direct_reply_decision(
-            intent="human_handoff_request",
-            topic="優惠方案申辦",
-            reply=WEB_HUMAN_HANDOFF_REPLY,
-            reason="direct_promotion_application_handoff_rule",
-        )
-
-    if (
-        any(term in text for term in RELOCATION_TERMS)
-        and any(term in text for term in ["網路", "寬頻"])
-        and not any(term in text for term in RELOCATION_FEE_TERMS)
-    ):
-        if any(term in text for term in RELOCATION_NETWORK_ONLY_TERMS):
-            return build_direct_reply_decision(
-                intent="network_only_relocation",
-                topic="網路移機",
-                reply=(
-                    "可以的，您可先辦理寬頻網路移機，第四台服務可暫不辦理移機。"
-                    "為確認新址是否位於本公司服務範圍內，請提供搬遷後的完整地址，"
-                    "我們將先為您查詢並協助安排網路移機。"
-                ),
-                reason="direct_network_only_relocation_rule",
-            )
-
-        if any(term in text for term in ["第四台", "電視", "有線電視"]):
-            return build_direct_reply_decision(
-                intent="tv_network_relocation",
-                topic="有線電視與網路移機",
-                reply=(
-                    "您好，我們可受理有線電視與寬頻網路同時辦理移機。"
-                    "為確認新址是否位於本公司服務範圍內，請您提供搬遷後的完整地址，"
-                    "我們將先為您查詢並協助後續移機申請。"
-                ),
-                reason="direct_tv_network_relocation_rule",
-            )
-
-    if any(term in text for term in VAGUE_NETWORK_TROUBLESHOOTING_TERMS):
-        return build_clarify_decision(
-            intent="network_troubleshooting_clarify",
-            topic="網路排除",
-            reply=(
-                "請問您想排除的是哪一種網路狀況：無法連線、速度慢、Wi-Fi 連不上、"
-                "數據機燈號異常，還是只有特定手機或電腦不能上網？"
-            ),
-            reason="clarify_vague_network_troubleshooting_rule",
-        )
-
-    if "哪個住址" in text or "哪個地址" in text:
-        return build_direct_reply_decision(
-            intent="address_disambiguation",
-            topic="地址核對",
-        reply="查詢帳單請提供客戶編號、戶名、登記電話任兩項；合約資訊則需先登入會員查詢。",
-            reason="direct_address_disambiguation_rule",
-        )
-
-    compact_text = text.replace(" ", "").replace("　", "")
-    if (
-        any(term.replace(" ", "").replace("　", "") in compact_text for term in RENEWAL_PROCESS_TERMS)
-        and any(term.replace(" ", "").replace("　", "") in compact_text for term in RENEWAL_PROCESS_ACTION_TERMS)
-    ):
-        return build_knowledge_query_decision(
-            intent="renewal_process_query",
-            topic="續約辦理方式",
-            knowledge_query=(
-                "續約 重新續約 續訂 重新訂購 約滿 合約到期後 "
-                "合約狀態 換約 升級 辦理方式 流程 客服確認"
-            ),
-            reason="direct_renewal_process_knowledge_rule",
-        )
-
-    recent_campaign = infer_recent_campaign_topic(memory)
-    if recent_campaign and any(
-        term.replace(" ", "").replace("　", "") in compact_text
-        for term in ONE_YEAR_NETWORK_CONTRACT_TERMS
-    ):
-        return build_direct_reply_decision(
-            intent="promotion_one_year_contract_followup",
-            topic=f"{recent_campaign} 一年合約",
-            reply=(
-                f"前面提到的「{recent_campaign}」資料沒有列出只綁一年的優惠選項。\n"
-                "請注意，「年繳」是繳費週期，不代表合約只綁一年；目前資料所列主推優惠多為 24 個月。\n"
-                "若要確認是否另有一年合約或其他非主推選擇，需由客服依當期方案確認。"
-            ),
-            reason="direct_promotion_one_year_contract_followup_rule",
-        )
-
-    # A customer can mention an expiring contract only as context for choosing
-    # a new standalone network plan.  Preserve that explicit purchase intent
-    # instead of hijacking the turn as a personal contract lookup.
-    if is_pure_network_plan_query(text):
-        return build_knowledge_query_decision(
-            intent="pure_network_install_plan_query",
-            topic="純網方案",
-            reason="direct_pure_network_plan_before_contract_lookup_rule",
-            knowledge_query=f"{PURE_NETWORK_INSTALL_KNOWLEDGE_QUERY} {text}",
-        )
-
-    if any(term in text for term in CONTRACT_LOOKUP_TERMS):
-        return build_tool_action_decision(
-            intent="service_content_query",
-            tool_name="search_contract_info",
-            topic="合約查詢",
-            reply="可以，我幫您查詢目前服務內容與合約資訊。",
-            reason="direct_contract_lookup_rule",
-        )
-
-    if is_hatv_plus_youtube_query(text):
-        return build_direct_reply_decision(
-            intent="hatv_plus_youtube",
-            topic="哈TV+ YouTube",
-            reply=HATV_PLUS_YOUTUBE_REPLY,
-            reason="direct_hatv_plus_youtube_rule",
-        )
-
-    if any(term in text for term in APPLE_PAY_TERMS):
-        return build_direct_reply_decision(
-            intent="apple_pay_payment",
-            topic="Apple Pay",
-            reply=(
-                "目前不支援 Apple Pay。您可改用帳單條碼至超商繳費、官網線上繳費、"
-                "哈TV行動客服 APP、金融機構代收，或至公司櫃台繳費；實際可用方式仍以帳單與客服確認為準。"
-            ),
-            reason="direct_apple_pay_rule",
-        )
-
-    if is_social_discount_alternative_promotion_query(text):
-        return build_clarify_decision(
-            intent="promotion_service_scope_clarification",
-            topic="優惠方案服務類型",
-            reply=PROMOTION_SERVICE_SCOPE_CLARIFY_REPLY,
-            reason="social_discount_ineligible_promotion_scope_clarification_rule",
-        )
-
-    if is_low_income_500m_year_fee_query(text):
-        return build_direct_reply_decision(
-            intent="low_income_500m_year_fee",
-            topic="低收入戶 500M 年費",
-            reply=get_policy_text(
-                memory,
-                "promotion.low_income_500m_year_fee",
-                "reply",
-                LOW_INCOME_500M_YEAR_REPLY,
-            ),
-            reason="direct_low_income_500m_year_fee_rule",
-        )
-
-    if any(term in text for term in LOW_INCOME_DISABILITY_TERMS):
-        return build_knowledge_query_decision(
-            intent="social_discount_query",
-            topic="社福優惠",
-            knowledge_query=text,
-            reason="social_discount_knowledge_rule",
-        )
-
-    if any(term in text for term in ENGINEER_WEEKEND_TERMS):
-        return build_direct_reply_decision(
-            intent="engineer_weekend_service",
-            topic="工程假日服務",
-            reply=(
-                "假日可受理裝機或維修預約，但仍需依當日工程量控與排程確認。"
-                "裝機工程會依可預約時段安排；維修工程通常由輪值人員處理，實際到府時間需由客服確認。"
-            ),
-            reason="direct_engineer_weekend_rule",
-        )
-
-    if any(term in text for term in REMOTE_PRICE_TERMS):
-        return build_direct_reply_decision(
-            intent="remote_control_price",
-            topic="遙控器價格",
-            reply=get_policy_text(
-                memory,
-                "support.remote_control_price",
-                "reply",
-                (
-                    "一般型遙控器 300 元、語音遙控器 400 元，保固一年；"
-                    "實際型號與是否需更換仍以客服或工程人員確認為準。"
-                ),
-            ),
-            reason="direct_remote_control_price_rule",
-        )
-
-    if any(term in text for term in REMOTE_POWER_LEARN_TERMS):
-        return build_direct_reply_decision(
-            intent="remote_power_learning",
-            topic="雙模機遙控器電源鍵學習",
-            reply=(
-                "雙模機遙控器若要拷貝或學習電視電源鍵，可先將電視原廠遙控器與雙模機遙控器的紅外線發射端相對，"
-                "距離約 3 到 5 公分；接著長按雙模機遙控器的「學習／設定」鍵約 3 秒進入學習模式，"
-                "再按雙模機遙控器要設定的「電源鍵」，最後按電視原廠遙控器的「電源鍵」。"
-                "若指示燈閃爍後保持常亮，通常代表學習成功；完成後按 OK 或設定鍵保存。"
-                "不同型號按鍵名稱與燈號可能不同，若無法完成請洽真人客服確認型號。"
-            ),
-            reason="direct_remote_power_learning_rule",
-        )
-
-    if any(term in text for term in WIFI_AP_SETTING_TERMS):
-        return build_direct_reply_decision(
-            intent="wifi_ap_setting",
-            topic="Wi-Fi AP 設定",
-            reply=(
-                "新增 Wi-Fi 無線 AP 或分享器時，請依該品牌說明書進入設定頁；"
-                "網路連線類型通常選「動態 DHCP／浮動 IP」，再設定 Wi-Fi 名稱與密碼即可。"
-                "若需橋接、固定 IP 或特殊內網設定，建議由工程或客服協助確認。"
-            ),
-            reason="direct_wifi_ap_setting_rule",
-        )
-
-    normalized_width_text = normalize_text_width(text)
-    if (
-        any(term in text for term in WIFI_ROUTER_SALE_TERMS)
-        and any(term in normalized_width_text.lower() for term in ("wifi", "wi-fi", "分享器", "mesh"))
-    ):
-        return build_direct_reply_decision(
-            intent="wifi_router_sale",
-            topic="Wi-Fi 分享器租借/加購",
-            reply=(
-                "目前提供的是「租借／加購」Wi-Fi 分享器服務，暫無單機販售資訊。"
-                "申裝寬頻網路可搭配 Mesh WiFi 租借方案：Mesh WiFi-5 半年繳 150 元／顆、年繳 300 元／顆；"
-                "Mesh WiFi-6 半年繳 300 元／顆、年繳 600 元／顆。"
-                "也可透過聯網機上盒 VIP會員 → 優惠專區 → 加值服務 → MESH WIFI 加值服務申辦；"
-                "實際是否可辦理仍需由客服確認。"
-            ),
-            reason="direct_wifi_router_sale_rule",
-        )
-
-    if is_convenience_store_payment_machine_query(text):
-        return build_knowledge_query_decision(
-            intent="convenience_store_payment_machine_guide",
-            topic="超商繳費機操作",
-            knowledge_query="IBON FAMIPORT ibon famiport 超商繳費機 便利商店機台 繳費教學 操作流程 7-Eleven 全家",
-            reason="direct_convenience_store_payment_machine_guide_rule",
-        )
-
-    if is_online_payment_account_help_query(text):
-        return build_direct_reply_decision(
-            intent="online_payment_account_help",
-            topic="線上繳費帳號協助",
-            reply=(
-                "用戶編號可在紙本帳單、簡訊帳單，或哈TV行動客服 APP 的帳務資料中找到。\n"
-                "若已註冊但忘記密碼，請在 APP 或官網登入頁選擇「忘記密碼」，"
-                "依登記手機號碼接收簡訊驗證碼後重設。\n"
-                "若尚未註冊、收不到驗證簡訊或無法確認用戶編號，請由真人客服協助核對。"
-            ),
-            reason="direct_online_payment_account_help_rule",
-        )
-
-    if is_network_fee_overdue_query(text):
-        return build_direct_reply_decision(
-            intent="overdue_network_bill_payment",
-            topic="網路費逾期繳費",
-            reply=(
-                "網路費已逾期仍可先嘗試繳費：\n"
-                "1. 至官網「線上繳費專區」繳費。\n"
-                "2. 使用哈TV行動客服 APP 繳費。\n"
-                "3. 持帳單條碼至 7-11 ibon 或全家 FamiPort 等超商通路繳費。\n"
-                "4. 至公司櫃台臨櫃繳費。\n"
-                "若帳單條碼已失效或無法繳費，請由真人客服協助確認帳務狀況。"
-            ),
-            reason="direct_overdue_network_bill_payment_rule",
-        )
-
-    if is_payment_method_query(text):
-        return build_direct_reply_decision(
-            intent="bill_payment_methods",
-            topic="繳費方式",
-            reply=PAYMENT_METHOD_REPLY,
-            reason="direct_payment_method_query_rule",
-        )
-
-    if is_install_contact_or_quote_followup(text):
-        profile = get_company_profile(memory.get("company_code") or memory.get("tv_cable") or DEFAULT_TV_CABLE)
-        install_link = build_company_link(profile, "裝機申告")
-        install_channel = (
-            f"也可透過{install_link}補充需求，讓專人協助追蹤。"
-            if install_link
-            else "若需查詢已現勘或報價進度，建議轉由真人客服協助追蹤。"
-        )
-        return build_direct_reply_decision(
-            intent="install_contact_or_quote_followup",
-            topic="裝機報價與聯繫追蹤",
-            reply=(
-                "您好，您這個狀況需要由真人客服協助確認現勘、報價或牽線進度。\n"
-                f"{install_channel}"
-            ),
-            reason="direct_install_contact_or_quote_followup_rule",
-        )
-
-    if is_basic_tv_fee_query(text):
-        return build_knowledge_query_decision(
-            intent="basic_tv_fee_query",
-            topic="有線電視基本收費",
-            knowledge_query=(
-                f"{text} CATV TV 基本收費標準 只看第四台 純 TV 有線電視 "
-                "基本收視費 月繳 月租 月費 裝機費 機上盒押金 分機費"
-            ),
-            reason="direct_basic_tv_fee_knowledge_rule",
-        )
-
-    if is_value_added_service_followup_query(text, memory):
-        return build_knowledge_query_decision(
-            intent="value_added_service_query",
-            topic="加值服務",
-            knowledge_query="各項單品銷售 加值服務 數位電視套餐 加值數位套餐 月繳 價格",
-            reason="direct_value_added_service_followup_knowledge_rule",
-        )
-
-    hatv_package_key = detect_hatv_package_key(text)
-    if hatv_package_key:
-        return build_knowledge_query_decision(
-            intent="hatv_package_channel_query",
-            topic=f"哈TV {hatv_package_key}套餐",
-            knowledge_query=f"雲林 哈TV {hatv_package_key}套餐 頻道內容 原價 有哪些頻道 {text}",
-            reason="direct_hatv_package_channel_knowledge_rule",
-        )
-
-    if is_value_added_service_query(text):
-        if not is_value_added_catalog_overview_query(text):
-            return build_clarify_decision(
-                intent="value_added_service_clarification",
-                topic="加值服務",
-                reply=VALUE_ADDED_SERVICE_CLARIFY_REPLY,
-                reason="direct_unspecified_value_added_service_clarification",
-            )
-        return build_knowledge_query_decision(
-            intent="value_added_service_query",
-            topic="加值服務",
-            knowledge_query="加值服務 單品銷售 熱門單品 加購服務 優惠專區 VIP會員",
-            reason="direct_value_added_service_knowledge_rule",
-        )
-
-    promotion_followup = detect_promotion_followup_detail_query(text, memory)
-    if promotion_followup:
-        return promotion_followup
-
-    if is_service_suspension_query(text):
-        return build_service_suspension_query_decision("direct_service_suspension_query_rule")
-
-    if is_ambiguous_service_stop_query(text):
-        return build_clarify_decision(
-            intent="stop_watching_clarify",
-            topic="退租或暫停服務",
-            reply=STOP_WATCHING_CLARIFY_REPLY,
-            reason="direct_ambiguous_service_stop_rule",
-        )
-
-    if is_service_termination_query(text):
-        return build_service_termination_query_decision("direct_service_termination_query_rule")
-
-    if any(term in text for term in BILL_LOST_OR_PAYMENT_TERMS):
-        return build_direct_reply_decision(
-            intent="bill_payment_methods",
-            topic="帳單遺失與繳費方式",
-            reply=(
-                "帳單不見或沒收到時，仍可用多種方式繳費：可至 7-11 ibon 或全家 FamiPort 依指示繳費，"
-                "也可用官網線上繳費、哈TV行動客服 APP，或到公司櫃台繳費。"
-                "若需要補發簡訊帳單，再提供戶名與聯絡電話由客服協助。"
-            ),
-            reason="direct_bill_lost_payment_methods_rule",
-        )
-
-    if is_service_content_query(text):
-        return build_tool_action_decision(
-            intent="service_content_query",
-            tool_name="search_contract_info",
-            topic="服務內容查詢",
-            reply="可以，我幫您查詢目前服務內容與合約資訊。",
-            reason="direct_service_content_query_rule",
-        )
-
-    if any(term in text for term in PERSONAL_ACCOUNT_QUERY_TERMS):
-        return build_tool_action_decision(
-            intent="service_content_query",
-            tool_name="search_contract_info",
-            topic="合約到期日",
-            reply="可以，我幫您查詢目前服務內容與合約資訊。",
-            reason="direct_contract_date_rule",
-        )
-
-    if any(term in text for term in CURRENT_PLAN_QUERY_TERMS):
-        return build_tool_action_decision(
-            intent="service_content_query",
-            tool_name="search_contract_info",
-            topic="目前合約方案",
-            reply="可以，我幫您查詢目前服務內容與合約資訊。",
-            reason="direct_current_plan_rule",
-        )
-
-    if any(term in text for term in APP_BILL_GUIDE_TERMS):
-        return build_direct_reply_decision(
-            intent="app_bill_guide",
-            topic="哈TV行動客服 APP 查帳單",
-            reply=(
-                "您可以用哈TV行動客服 APP 查詢帳單：先下載並登入 APP，"
-                "進入帳務或我的資訊相關選單，再點選帳單查詢或帳單歷史。"
-                "若登入後查不到資料，請確認帳號是否已綁定正確用戶資料，或由客服協助身分核對。"
-            ),
-            reason="direct_app_bill_guide_rule",
-        )
-
-    if any(term in text for term in PASSWORD_TERMS):
-        return build_direct_reply_decision(
-            intent="password_help",
-            topic="忘記密碼",
-            reply=(
-                "如果是哈TV行動客服或會員帳號忘記密碼，請先使用登入頁面的「忘記密碼」流程重設。"
-                "若無法完成重設，建議由客服協助身分核對後處理；請不要在公開對話中提供完整密碼或敏感資料。"
-            ),
-            reason="direct_password_rule",
-        )
-
-    if any(term in text for term in SIGNAL_SOURCE_TERMS):
-        return build_direct_reply_decision(
-            intent="remote_input_source_help",
-            topic="訊號源設定",
-            reply=(
-                "請您拿電視遙控器，按「訊號源／INPUT／SOURCE」鍵，切換到機上盒連接的來源，"
-                "常見為 HDMI1、HDMI2 或 AV。若不確定是哪一個，可以逐一切換，"
-                "每切一次等 3 到 5 秒確認畫面是否恢復。"
-            ),
-            reason="direct_signal_source_rule",
-        )
-
-    if any(term in text for term in TV_BLURRY_TERMS):
-        return build_direct_reply_decision(
-            intent="tv_blurry_picture",
-            topic="電視畫面不清",
-            reply=(
-                "電視畫面不清時，請先確認是第幾台，以及是單一頻道不清還是全部頻道都不清。"
-                "您也可以先將機上盒電源拔掉約 10 秒後重新插上，等待 2 到 3 分鐘再確認；"
-                "若仍不清楚，請提供頻道號碼與是否所有頻道皆異常，方便客服或工程協助判斷。"
-            ),
-            reason="direct_tv_blurry_picture_rule",
-        )
-
-    if any(term in text for term in TV_LAG_TERMS):
-        return build_direct_reply_decision(
-            intent="tv_picture_lag",
-            topic="電視畫面 lag",
-            reply=(
-                "有畫面但會 lag 時，請先將機上盒電源拔掉約 10 秒後重新插上，等待 2 到 3 分鐘再確認。"
-                "若仍會 lag，請再確認是單一頻道還是全部頻道、是否固定時段發生，後續可由真人客服協助安排檢查。"
-            ),
-            reason="direct_tv_picture_lag_rule",
-        )
-
-    if is_remote_control_issue(text):
-        return build_direct_reply_decision(
-            intent="remote_control_issue",
-            topic="遙控器故障",
-            reply=(
-                "遙控器沒有反應時，請先確認按鍵時是否亮紅燈、電池是否有電、正負極是否裝反，並更換新電池再試一次。"
-                "若仍無法操作，請對準機上盒或電視感應位置，確認中間沒有遮蔽物，"
-                "並確認機上盒前方 IR 接收器沒有脫落。"
-                "更換電池後仍無法使用時，可能需要更換遙控器。"
-                "一般型遙控器 300 元、語音型遙控器 400 元，可臨櫃購買；實際型號與費用仍以客服確認為準。"
-                "若上述排除後仍無法使用，可接續協助登記維修。"
-            ),
-            reason="direct_remote_control_rule",
-        )
-
-    if any(term in text for term in CANCEL_REPAIR_TERMS):
-        return build_tool_action_decision(
-            intent="cancel_repair",
-            tool_name="cancel_repair_ticket",
-            topic="取消報修",
-            reply="可以，我先用模擬取消報修 API 測試流程。",
-            reason="direct_cancel_repair_rule",
-        )
-
-    promotion_price_difference = detect_promotion_price_difference_query(text, memory)
-    if promotion_price_difference:
-        return promotion_price_difference
-
-    cancel_tv_keep_internet = detect_cancel_tv_keep_internet_query(text, memory)
-    if cancel_tv_keep_internet:
-        return cancel_tv_keep_internet
-
-    if is_clear_channel_group_query(text):
-        return build_clear_channel_group_knowledge_decision(text)
-
-    if is_tv_network_install_option_query(text) or any(term in text for term in COMBO_PLAN_TERMS):
-        return build_knowledge_query_decision(
-            intent="tv_network_install_plan_query",
-            topic="電視+網路方案",
-            reason="direct_tv_network_install_option_knowledge_rule",
-            knowledge_query=f"{TV_NETWORK_INSTALL_KNOWLEDGE_QUERY} {text}",
-        )
-
-    if is_pure_network_plan_query(text):
-        return build_knowledge_query_decision(
-            intent="pure_network_install_plan_query",
-            topic="純網方案",
-            reason="direct_pure_network_plan_knowledge_rule",
-            knowledge_query=f"{PURE_NETWORK_INSTALL_KNOWLEDGE_QUERY} {text}",
-        )
-
-    promotion_activity = detect_promotion_activity_query(text, memory)
-    if promotion_activity:
-        return promotion_activity
-
-    if (
-        any(term in compact_text for term in BROADBAND_PRICE_TERMS)
-        or (
-            any(term in compact_text for term in ("網路", "寬頻"))
-            and any(term in compact_text for term in ("多少錢", "費用", "費率", "收費", "月租", "價格", "$"))
-        )
-    ) and not any(term in compact_text for term in BROADBAND_PRICE_EXCLUDE_TERMS):
-        return build_knowledge_query_decision(
-            intent="broadband_plan_price_query",
-            topic="單辦寬頻費用",
-            knowledge_query=(
-                f"{text} 500M 網路 優惠方案 一般寬頻方案 單辦寬頻 "
-                "單辦 同裝 月繳 季繳 半年繳 年繳 方案名稱 裝機費 押金"
-            ),
-            reason="direct_broadband_plan_price_knowledge_rule",
-        )
-
-    sports_broadcast = detect_sports_broadcast_query(text)
-    if sports_broadcast:
-        return sports_broadcast
-
-    if is_channel_number_gap_query(text):
-        return build_direct_reply_decision(
-            intent="channel_number_gap_explanation",
-            topic="頻道號碼缺口",
-            reply=(
-                "頻道號碼不一定會連續排列，部分號碼可能沒有配置頻道；"
-                "數位頻道也可能使用 4XX 等號碼區段。\n"
-                "基本收視頻道通常約有 100～120 個，但實際頻道與號碼仍依系統台公告為準。\n"
-                "若要確認特定節目在哪一台，請提供頻道名稱，我可以再幫您查詢。"
-            ),
-            reason="direct_channel_number_gap_rule",
-        )
-
-    if (
-        any(term in text for term in ("電視", "第四台", "頻道", "機上盒"))
-        and any(term in text for term in ("訊號不好", "訊號不佳", "訊號不良", "無法正常看", "不能正常看", "卡卡", "不穩"))
-    ):
-        return build_troubleshooting_decision(text, "direct_tv_signal_fault_before_channel_query_rule")
-
-    channel_name = extract_channel_name_from_query(text)
-    if any(term in text for term in CHANNEL_QUERY_TERMS) or channel_name == "霹靂台灣台":
-        return build_tool_action_decision(
-            intent="channel_query",
-            tool_name="search_channel_no",
-            topic="頻道位置查詢",
-            reply="可以，我先用模擬頻道 API 查詢頻道位置。",
-            reason="direct_channel_query_rule",
-            extracted_slots={"channel_name": channel_name or None},
-        )
-
-    if is_hatv_addon_query(text):
-        if is_addon_knowledge_query(text):
-            return build_knowledge_query_decision(
-                intent="hatv_addon_knowledge",
-                topic="哈TV 數位套餐加購",
-                knowledge_query=f"哈TV 數位套餐 加購 費用 內容 申請方式 {text}",
-                reason="direct_hatv_addon_knowledge_rule",
-            )
-        return build_direct_reply_decision(
-            intent="hatv_addon",
-            topic="哈TV 加購",
-            reply=CUSTOMER_TOOL_FLOW_DISABLED_MESSAGE,
-            reason="direct_hatv_addon_rule",
-        )
-
-    if any(term in text for term in ADVANCED_NETWORK_SETTING_TERMS):
-        return build_direct_reply_decision(
-            intent="advanced_network_setting",
-            topic="路由器與橋接模式",
-            reply=(
-                "路由器模式通常由設備負責撥號、NAT 與分配內網 IP；橋接模式則較像把連線交給後端路由器處理。"
-                "實際 Zyxel 設備要設定為路由器或橋接器，需依您的申裝方式、固定 IP、內網需求與公司端設定確認；"
-                "若涉及後台參數，建議由客服或工程人員協助。"
-            ),
-            reason="direct_advanced_network_setting_rule",
-        )
-
-    if "違約金" in text:
-        return build_tool_action_decision(
-            intent="contract_penalty_lookup",
-            tool_name="search_contract_info",
-            topic="合約違約金",
-            reply="違約金會依您的申辦方案、合約期間與目前狀態而不同，先為您查詢合約資料。",
-            reason="direct_contract_penalty_lookup_rule",
-        )
-
-    if is_set_top_box_multi_fee_query(text):
-        if is_two_set_top_box_monthly_total_query(text):
-            return build_direct_reply_decision(
-                intent="two_set_top_box_monthly_total",
-                topic="兩台機上盒月繳首期費用",
-                reply=(
-                    "月繳申裝 2 台機上盒的首期費用如下：\n"
-                    "收視費：$550 × 2 個月＝$1,100\n"
-                    "裝機費：$1,500\n"
-                    "第 1、2 台機上盒：免費借用、免押金\n"
-                    "合計：$1,100 + $1,500＝$2,600"
-                ),
-                reason="direct_two_set_top_box_monthly_total_rule",
-            )
-        if is_three_set_top_box_half_year_query(text):
-            return build_direct_reply_decision(
-                intent="three_set_top_box_half_year_fee",
-                topic="三台機上盒半年繳費用",
-                reply=(
-                    "3 台機上盒半年繳費用如下：\n"
-                    "半年收視費：$3,240\n"
-                    "裝機費：$1,000（半年繳優惠價）\n"
-                    "第 2、3 台分機施工費：$500 × 2 台＝$1,000\n"
-                    "第 3 台機上盒押金：$1,200\n"
-                    "合計：$3,240 + $1,000 + $1,000 + $1,200＝$6,440"
-                ),
-                reason="direct_three_set_top_box_half_year_fee_rule",
-            )
-        return build_knowledge_query_decision(
-            intent="set_top_box_multi_fee_query",
-            topic="多台機上盒收費",
-            knowledge_query=(
-                "有線電視基本收費 機上盒多台 第1台 第2台 第3台 第6台 "
-                "半年繳 收視費 裝機費 TV 分機費 STB 設備押金 分機施工費 合計 "
-                f"{text}"
-            ),
-            reason="direct_set_top_box_multi_fee_knowledge_rule",
-        )
-
-    if (
-        any(term in compact_text for term in ("網路", "寬頻"))
-        and any(term in compact_text for term in ("新裝", "新申裝", "申裝", "裝機", "申辦"))
-        and any(term in compact_text for term in ONE_YEAR_NETWORK_CONTRACT_TERMS)
-    ):
-        return build_direct_reply_decision(
-            intent="new_network_one_year_contract",
-            topic="新申裝寬頻綁約期間",
-            reply=(
-                "您好，目前資料未列出只綁一年的新申裝網路方案；目前主推 24 個月優惠方案，"
-                "可享較優惠的月租費及方案內容。\n"
-                "若您想了解詳細方案或確認是否有其他適合您的選擇，可由文字客服專人為您進一步說明，謝謝。"
-            ),
-            reason="direct_new_network_one_year_contract_rule",
-        )
-
-    # A question that names an installation location is about service coverage,
-    # even though it also contains generic installation words such as "裝" or
-    # "申請". Resolve that explicit target before the generic new-install plan
-    # rules below can consume the question.
-    if is_service_availability_query(text):
-        current_service_target = resolve_service_availability_target(text)
-        current_target_memory = dict(memory)
-        current_target_memory["service_availability_context"] = current_service_target
-        service_availability = detect_service_availability_query(text, current_target_memory)
-        if service_availability:
-            return service_availability
-
-    if is_tv_network_install_option_query(text):
-        return build_knowledge_query_decision(
-            intent="tv_network_install_plan_query",
-            topic="電視+網路方案",
-            reason="direct_tv_network_install_option_knowledge_rule",
-            knowledge_query=f"{TV_NETWORK_INSTALL_KNOWLEDGE_QUERY} {text}",
-        )
-
-    if is_pure_tv_install_query(text):
-        profile = get_company_profile(memory.get("company_code") or memory.get("tv_cable") or DEFAULT_TV_CABLE)
-        company_code = str(memory.get("company_code") or memory.get("tv_cable") or DEFAULT_TV_CABLE).lower()
-        company_name = str(profile.get("name") or "")
-        if company_code == "tdtv" or "大屯" in company_name:
-            return build_direct_reply_decision(
-                intent="pure_tv_install_query",
-                topic="有線電視裝機申請",
-                reply=TATUNG_TV_INSTALL_REPLY,
-                reason="direct_tatung_pure_tv_install_fee_rule",
-            )
-
-        return build_direct_reply_decision(
-            intent="pure_tv_install_query",
-            topic="有線電視裝機申請",
-            reply=PURE_TV_INSTALL_REPLY,
-            reason="direct_pure_tv_install_handoff_rule",
-        )
-
-    if is_network_install_option_query(text) or is_pure_network_plan_query(text):
-        return build_knowledge_query_decision(
-            intent="pure_network_install_plan_query",
-            topic="純網方案",
-            reason="direct_pure_network_install_option_knowledge_rule",
-            knowledge_query=f"{PURE_NETWORK_INSTALL_KNOWLEDGE_QUERY} {text}",
-        )
-
-    if any(term in text for term in ("我想安裝網路", "想安裝網路", "我要安裝網路", "我想裝網路", "想裝網路", "我要裝網路")):
-        return build_knowledge_query_decision(
-            intent="pure_network_install_plan_query",
-            topic="純網方案",
-            reason="direct_new_network_install_plan_knowledge_rule",
-            knowledge_query=(
-                f"{PURE_NETWORK_INSTALL_KNOWLEDGE_QUERY} {text}"
-            ),
-        )
-
-    if any(term in text for term in NEW_INSTALL_TERMS):
-        compact = (text or "").replace(" ", "").replace("　", "")
-        if any(term in compact for term in NEW_INSTALL_FAULT_CONTEXT_TERMS):
-            return build_troubleshooting_decision(text, "direct_new_install_fault_context_rule")
-
-        profile = get_company_profile(memory.get("company_code") or memory.get("tv_cable") or DEFAULT_TV_CABLE)
-        service_items = str(profile.get("service_items") or "")
-        supports_tv = "有線電視" in service_items
-        install_link = build_company_link(profile, "裝機申告")
-        install_channel = (
-            f"您可透過{install_link}填寫需求，由專人與您聯繫；也可轉由真人客服協助辦理。"
-            if install_link
-            else "目前公司資訊未設定裝機申告連結，建議轉由真人客服協助辦理。"
-        )
-        install_reply = (
-            "您好，歡迎申請網路裝機！可先參考目前可申辦的寬頻速率與優惠方案，"
-            "實際月繳/半年繳/年繳、裝機費、押金與綁約條件需依服務地區、合約狀態與活動資格確認。\n"
-            f"{install_channel}"
-        )
-        if supports_tv:
-            install_reply += "\n若您同時需要有線電視與網路，客服也可協助確認是否有適用的電視加網路同裝方案。"
-        return build_direct_reply_decision(
-            intent="new_network_install_plan",
-            topic="新申裝寬頻方案",
-            reply=install_reply,
-            reason="direct_new_install_plan_query_rule",
-        )
-
-    if (
-        any(term in text for term in UPGRADE_LINE_TERMS)
-        and any(term in text for term in LINE_CHANGE_TERMS)
-    ):
-        return build_direct_reply_decision(
-            intent="speed_upgrade",
-            topic="升級網速是否需改線",
-            reply=(
-                "升級網速是否需要更改線路，要依現場線路、數據機與申辦方案確認。"
-                "通常不一定需要更改屋內線路，但可能需要更換數據機或分享器；"
-                "建議提供目前方案，由客服確認是否需要施工或更換設備。"
-            ),
-            reason="direct_speed_upgrade_line_rule",
         )
 
     return None
@@ -6658,41 +4351,6 @@ def detect_contextual_feedback_direct_reply(
     return None
 
 
-def detect_troubleshooting_query(
-    text: str,
-    memory: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
-    text = (text or "").strip()
-    memory = memory or {}
-    known = memory.get("known_info", {})
-
-    if not text:
-        return None
-
-    if detect_value_added_product_knowledge_query(text) or detect_equipment_purchase_knowledge_query(text):
-        return None
-
-    if memory.get("pending_tool") or known.get("troubleshooting_started") == "yes":
-        return None
-
-    if text in DIRECT_FAULT_REPORT_TERMS:
-        return build_troubleshooting_decision(text, "direct_fault_report_rule")
-
-    compact = text.replace(" ", "").replace("　", "")
-    has_installed_context = any(term.replace(" ", "").replace("　", "") in compact for term in INSTALLED_SERVICE_CONTEXT_TERMS)
-    has_trouble = any(term.replace(" ", "").replace("　", "") in compact for term in INSTALLED_SERVICE_TROUBLE_TERMS)
-    if has_installed_context and has_trouble:
-        return build_troubleshooting_decision(text, "installed_service_trouble_rule")
-
-    if is_general_signal_fault_report(text):
-        return build_troubleshooting_decision(text, "general_signal_fault_rule")
-
-    if detect_troubleshooting_type(text):
-        return build_troubleshooting_decision(text, "troubleshooting_keyword_rule")
-
-    return None
-
-
 def build_company_info_clarify_decision(text: str, reason: str) -> Dict[str, Any]:
     return validate_router_result({
         "route": "clarify",
@@ -6745,154 +4403,6 @@ def has_receipt_barcode_text(text: str) -> bool:
     value = text or ""
     barcode_count = len(re.findall(r"第\s*[一二三123]\s*段(?:\s*條碼)?", value))
     return barcode_count >= 2
-
-
-def detect_payment_receipt_query(
-    text: str,
-    memory: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
-    text = (text or "").strip()
-    memory = memory or {}
-    known = memory.get("known_info", {})
-
-    if not text:
-        return None
-
-    has_strong_barcode_signal = has_receipt_barcode_text(text)
-    receipt_image_submission = is_receipt_image_submission(text, memory)
-    has_paid_reconnection_signal = (
-        any(term in text for term in PAID_RECONNECTION_TERMS)
-        and any(term in text for term in ["恢復", "復線", "開通", "收看", "不能看", "不能上網"])
-        and not any(term in text for term in ONLINE_PAYMENT_TERMS)
-    )
-
-    if (
-        (memory.get("pending_tool") or known.get("troubleshooting_started") == "yes")
-        and not has_strong_barcode_signal
-        and not receipt_image_submission
-    ):
-        return None
-
-    receipt_evidence = current_verified_receipt_image_evidence(memory, text)
-    if receipt_evidence:
-        return build_tool_action_decision(
-            intent="payment_receipt_reconnection",
-            tool_name="payment_bill_batch",
-            topic="超商收據復線",
-            reply="",
-            reason="verified_receipt_image_reconnection",
-        )
-
-    if receipt_image_submission:
-        return build_direct_reply_decision(
-            intent="payment_receipt_image_required",
-            topic="超商收據復線",
-            reply=RECEIPT_IMAGE_REUPLOAD_REPLY,
-            reason="payment_receipt_image_ocr_incomplete",
-        )
-
-    if has_strong_barcode_signal or (
-        any(term in text for term in PAYMENT_RECEIPT_TERMS)
-        and any(term in text for term in ["復線", "恢復", "開通", "繳費", "條碼"])
-    ) or has_paid_reconnection_signal:
-        return build_direct_reply_decision(
-            intent="payment_receipt_image_required",
-            topic="超商收據復線",
-            reply=RECEIPT_IMAGE_REQUIRED_REPLY,
-            reason="payment_receipt_image_evidence_required",
-        )
-
-    return None
-
-
-def detect_reconnection_query(
-    text: str,
-    memory: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
-    text = (text or "").strip()
-    memory = memory or {}
-    known = memory.get("known_info", {})
-
-    if not text:
-        return None
-
-    if memory.get("pending_tool") or known.get("troubleshooting_started") == "yes":
-        return None
-
-    if any(term in text for term in TV_AUTHORIZATION_TERMS):
-        return None
-
-    has_reconnection_signal = (
-        any(term in text for term in RECONNECTION_PROBLEM_TERMS)
-        or (
-            any(term in text for term in RECONNECTION_PAYMENT_TERMS)
-            and any(term in text for term in ["恢復", "復線", "開通", "收看", "不能看", "不能上網"])
-        )
-    )
-
-    if not has_reconnection_signal:
-        return None
-
-    if any(term in text for term in NETWORK_RECONNECTION_TERMS):
-        return build_reconnection_tool_decision(
-            "bill_return_line_internet",
-            "reconnection_network_rule",
-        )
-
-    if any(term in text for term in TV_RECONNECTION_TERMS):
-        return build_reconnection_tool_decision(
-            "bill_return_line_tv",
-            "reconnection_tv_rule",
-        )
-
-    return build_reconnection_clarify_decision("reconnection_service_type_clarify_rule")
-
-
-def detect_company_info_query(
-    text: str,
-    memory: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
-    text = (text or "").strip()
-    memory = memory or {}
-    known = memory.get("known_info", {})
-
-    if not text:
-        return None
-
-    if is_contextual_website_page_request(text):
-        return None
-
-    if memory.get("pending_tool") or known.get("troubleshooting_started") == "yes":
-        return None
-
-    if any(term in text for term in SERVICE_AREA_TERMS):
-        return build_company_info_decision("service_area", "company_info_service_area_rule")
-
-    if any(term in text for term in BUSINESS_HOUR_TERMS):
-        return build_company_info_decision("business_hours", "company_info_business_hours_rule")
-
-    if any(term in text for term in VALUE_ADDED_URL_TERMS):
-        return build_company_info_decision("value_added_urls", "company_info_value_added_urls_rule")
-
-    if is_explicit_company_website_request(text) and not is_reference_website_request(text) and not any(
-        term in text for term in PROMOTION_COMPANY_INFO_BLOCK_TERMS
-    ):
-        return build_company_info_decision("website", "company_info_website_rule")
-
-    if any(term in text for term in CONTACT_PHONE_TERMS):
-        return build_company_info_decision("contact_phone", "company_info_contact_phone_rule")
-
-    if (
-        any(term in text for term in COMPANY_ADDRESS_TERMS)
-        and not is_technical_ip_address_query(text)
-        and not is_address_service_plan_lookup_query(text)
-    ):
-        return build_company_info_decision("company_address", "company_info_address_rule")
-
-    if any(term in text for term in COMPANY_INFO_CLARIFY_TERMS):
-        return build_company_info_clarify_decision(text, "company_info_location_clarify_rule")
-
-    return None
 
 
 def is_reference_website_request(text: str) -> bool:
@@ -6952,28 +4462,6 @@ def detect_company_info_interrupt_query(
     return None
 
 
-def detect_ambiguous_short_query(text: str) -> Optional[Dict[str, Any]]:
-    text = (text or "").strip()
-    reply = AMBIGUOUS_TOPIC_REPLIES.get(text)
-
-    if not reply:
-        return None
-
-    return validate_router_result({
-        "route": "clarify",
-        "intent": "ambiguous_short_query",
-        "tool_name": None,
-        "topic": text,
-        "should_cancel_current_flow": False,
-        "should_call_tool": False,
-        "should_retrieve_knowledge": False,
-        "knowledge_query": None,
-        "reply": reply,
-        "extracted_slots": {},
-        "reason": "ambiguous_short_query",
-    })
-
-
 def build_definition_query_decision(text: str, reason: str) -> Dict[str, Any]:
     text = (text or "").strip()
     return validate_router_result({
@@ -7002,7 +4490,7 @@ def build_memory_summary(memory: Dict[str, Any]) -> str:
         "decision_type": memory.get("decision_type"),
         "service": memory.get("service"),
         "issue_type": memory.get("issue_type"),
-        "last_campaign_topic": memory.get("last_campaign_topic"),
+        "last_campaign_topic": memory.get("last_campaign_topic") or known.get("last_campaign_topic"),
         "last_value_added_topic": memory.get("last_value_added_topic") or known.get("last_value_added_topic"),
         "known_info": {
             "troubleshooting_started": known.get("troubleshooting_started"),
@@ -7027,12 +4515,32 @@ def build_memory_summary(memory: Dict[str, Any]) -> str:
             "first_barcode": known.get("first_barcode"),
             "second_barcode": known.get("second_barcode"),
             "third_barcode": known.get("third_barcode"),
+            "internet_reactivation_status": known.get("internet_reactivation_status"),
+            "internet_reactivation_message": known.get("internet_reactivation_message"),
             "tv_reactivation_status": known.get("tv_reactivation_status"),
             "tv_reactivation_message": known.get("tv_reactivation_message"),
+            "termination_service_scope": known.get("termination_service_scope"),
+            "last_campaign_topic": known.get("last_campaign_topic"),
             "last_value_added_topic": known.get("last_value_added_topic"),
         }
     }
-    return json.dumps(data, ensure_ascii=False, indent=2)
+    def compact(value):
+        if isinstance(value, dict):
+            result = {}
+            for key, item in value.items():
+                compacted = compact(item)
+                if compacted not in (None, "", [], {}):
+                    result[key] = compacted
+            return result
+        if isinstance(value, list):
+            return [compact(item) for item in value]
+        return value
+
+    return json.dumps(
+        compact(data),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def build_router_history_text(
@@ -7219,536 +4727,267 @@ def router_guard(
     user_input: str,
     memory: Dict[str, Any],
     router: Dict[str, Any],
-    *,
-    llm_first: bool = True,
 ) -> Dict[str, Any]:
     text = (user_input or "").strip()
     known = memory.get("known_info", {})
-    is_active_flow_switch_check = bool(memory.get("_active_flow_switch_check"))
     guarded = dict(router or {})
 
-    if llm_first:
-        # Model decisions are authoritative for semantics.  The post-model
-        # guard only normalizes the typed contract and blocks unsafe or
-        # duplicate tool execution; it never reclassifies customer wording.
-        if guarded.get("reason") == "model_router_unavailable":
-            return validate_router_result(guarded)
-
-        if (
-            guarded.get("route") == "tool_action"
-            and guarded.get("tool_name") == "bill_return_line_tv"
-            and known.get("tv_reactivation_status") == "already_temp_restored"
-        ):
-            return validate_router_result(build_direct_reply_decision(
-                intent="tv_reactivation_already_temp_restored_followup",
-                topic="電視暫時復線",
-                reply="電視服務已暫時恢復，不會重複送出復線申請。",
-                reason="guard_duplicate_tv_reactivation",
-            ))
-        if guarded.get("route") == "tool_action" and guarded.get("tool_name") not in SUPPORTED_TOOLS:
-            guarded.update({
-                "route": "unsupported_flow",
-                "tool_name": None,
-                "should_call_tool": False,
-                "should_retrieve_knowledge": False,
-                "reply": UNSUPPORTED_REPLY,
-                "reason": "guard_unsupported_tool_action",
-            })
-        elif guarded.get("route") == "unsupported_flow":
-            guarded["tool_name"] = None
-            guarded["should_call_tool"] = False
-            guarded["should_retrieve_knowledge"] = False
-            if not guarded.get("reply"):
-                guarded["reply"] = UNSUPPORTED_REPLY
-        elif guarded.get("route") == "knowledge_query":
-            guarded["tool_name"] = None
-            guarded["should_call_tool"] = False
-            guarded["should_retrieve_knowledge"] = True
-            if not guarded.get("knowledge_query"):
-                guarded["knowledge_query"] = text
-        elif guarded.get("route") == "unknown":
-            guarded["reply"] = DEFAULT_UNKNOWN_REPLY
-
-        # A bare authorization message can mean that the customer landed on
-        # an unsubscribed channel. It is not enough evidence to run a
-        # state-changing television reconnection API. Keep the LLM-selected
-        # service scope, but require the channel/authorization SOP first.
-        if (
-            guarded.get("route") == "tool_action"
-            and guarded.get("tool_name") == "bill_return_line_tv"
-            and is_tv_authorization_issue(text)
-        ):
-            return build_troubleshooting_decision(
-                text,
-                "guard_tv_authorization_requires_channel_check",
-            )
-
-        # A repair ticket changes the customer's service state. When a new
-        # turn already describes a concrete device, TV, or network symptom,
-        # complete the model-selected intent through the relevant diagnostic
-        # SOP first. This is a tool-safety gate, not a keyword reply: the
-        # customer still receives the LLM-routed troubleshooting flow and can
-        # request repair after the initial checks fail.
-        if (
-            guarded.get("route") == "tool_action"
-            and guarded.get("tool_name") == "create_repair_ticket"
-            and known.get("troubleshooting_started") != "yes"
-            and known.get("repair_ready") != "yes"
-        ):
-            guarded.update({
-                "route": "troubleshooting",
-                "tool_name": None,
-                "should_call_tool": False,
-                "should_retrieve_knowledge": False,
-                "reply": "",
-                "reason": "guard_initial_fault_requires_troubleshooting",
-            })
-
-        # The model has already interpreted the turn. A receipt barcode can
-        # trigger an account-side action only when the values came from a
-        # verified uploaded image, never from text the customer typed.
-        receipt_evidence = current_verified_receipt_image_evidence(memory, text)
-        if receipt_evidence and guarded.get("tool_name") == "payment_bill_batch":
-            return build_tool_action_decision(
-                intent="payment_receipt_reconnection",
-                tool_name="payment_bill_batch",
-                topic="超商收據復線",
-                reply="",
-                reason="guard_verified_receipt_image_reconnection",
-            )
-        if (
-            guarded.get("tool_name") == "payment_bill_batch"
-        ):
-            return build_direct_reply_decision(
-                intent="payment_receipt_image_required",
-                topic="超商收據復線",
-                reply=(
-                    RECEIPT_IMAGE_REUPLOAD_REPLY
-                    if is_receipt_image_submission(text, memory)
-                    else RECEIPT_IMAGE_REQUIRED_REPLY
-                ),
-                reason=(
-                    "guard_receipt_image_ocr_incomplete"
-                    if is_receipt_image_submission(text, memory)
-                    else "guard_receipt_image_evidence_required"
-                ),
-            )
-
-        # A model-selected handoff is an action contract, not free-form copy.
-        # Keep the model's intent but replace its wording with the canonical
-        # response so Web callers receive a real, signed handoff link.
-        if guarded.get("intent") in {"human_handoff_request", "human_agent"}:
-            return build_human_handoff_request_decision(
-                str(guarded.get("reason") or "llm_human_handoff_request"),
-                topic=str(guarded.get("topic") or "真人客服"),
-            )
-
+    # Model decisions are authoritative for semantics.  The post-model
+    # guard only normalizes the typed contract and blocks unsafe or
+    # duplicate tool execution; it never reclassifies customer wording.
+    if guarded.get("reason") == "model_router_unavailable":
         return validate_router_result(guarded)
 
-    # The keyword-based compatibility guard is retired.  Callers that omit
-    # model ownership receive schema normalization only; they cannot obtain a
-    # semantic route or a customer-facing answer from this function.
-    return validate_router_result(guarded)
-
-    entity_confirmation = detect_knowledge_entity_confirmation(text)
-    if entity_confirmation:
-        return entity_confirmation
-
-    if is_human_handoff_query(text):
-        if has_human_handoff_issue_context(memory) or has_human_handoff_issue_details(text):
-            return build_human_handoff_request_decision("guard_human_handoff_request")
-        return build_human_handoff_triage_decision("guard_human_handoff_requires_issue")
-
-    if is_human_handoff_confirmation_query(text):
-        return build_human_handoff_triage_decision("guard_human_handoff_requires_issue")
-
-    if is_contextual_website_page_request(text) and guarded.get("route") in {
-        "company_info",
-        "direct_reply",
-        "unknown",
-        "clarify",
-        None,
-        "",
-    }:
-        return build_contextual_website_page_decision(
-            text,
-            "guard_contextual_website_page_lookup",
+    model_intent = str(guarded.get("intent") or "").strip()
+    if model_intent in MODEL_HUMAN_HANDOFF_INTENT_ALIASES:
+        known["human_handoff_active"] = "yes"
+        known["human_handoff_topic"] = str(
+            guarded.get("topic") or "服務辦理"
         )
-
-    service_device_limit = detect_service_device_limit_knowledge_query(text)
-    if service_device_limit and guarded.get("route") in {
-        "tool_action",
-        "troubleshooting",
-        "continue_current_flow",
-    }:
-        service_device_limit["reason"] = "guard_service_device_limit_over_channel_tool"
-        return validate_router_result(service_device_limit)
-
-    equipment_purchase_candidate = detect_equipment_purchase_knowledge_query(text)
-    if equipment_purchase_candidate and guarded.get("route") in {"troubleshooting", "continue_current_flow"}:
-        equipment_purchase_candidate["reason"] = "guard_equipment_purchase_over_fault"
-        return validate_router_result(equipment_purchase_candidate)
-
-    value_added_candidate = detect_value_added_product_knowledge_query(text)
-    if value_added_candidate and guarded.get("route") in {"troubleshooting", "continue_current_flow"}:
-        return build_clarify_decision(
-            intent="value_added_product_or_fault_clarification",
-            topic="加值產品或設備故障",
-            reply="請問您是要查詢這項 WiFi 加值服務的內容或費用，還是 WiFi 設備目前無法使用？",
-            reason="guard_product_fault_intent_conflict",
+        memory["known_info"] = known
+        return build_human_handoff_request_decision(
+            str(guarded.get("reason") or "model_handoff_intent_alias"),
+            topic=str(guarded.get("topic") or "真人客服"),
         )
-
-    # A complete customer request must not be recast as an unspecified
-    # add-on question merely because the preceding turn mentioned an add-on.
-    direct_reply = detect_safe_direct_reply(text, memory)
-    if direct_reply:
-        return direct_reply
-
-    if should_clarify_unspecified_value_added_service(text, guarded):
-        return build_clarify_decision(
-            intent="value_added_service_clarification",
-            topic="加值服務",
-            reply=VALUE_ADDED_SERVICE_CLARIFY_REPLY,
-            reason="guard_unspecified_value_added_service_clarification",
+    if (
+        known.get("human_handoff_active") == "yes"
+        and not guarded.get("should_cancel_current_flow")
+        and model_intent in MODEL_HUMAN_HANDOFF_FOLLOWUP_INTENTS
+    ):
+        return build_human_handoff_request_decision(
+            "model_handoff_followup_contract",
+            topic=str(
+                known.get("human_handoff_topic")
+                or guarded.get("topic")
+                or "真人客服"
+            ),
         )
-
-    if is_unsupported_bill_detail_query(text):
+    if model_intent in MODEL_MEMBER_LOGIN_INTENTS:
         return build_direct_reply_decision(
-            intent="unsupported_bill_detail_lookup",
-            topic="帳單期間與起訖日",
-            reply=UNSUPPORTED_BILL_DETAIL_REPLY,
-            reason="guard_unsupported_bill_detail_rule",
+            intent="member_login_guidance",
+            topic="官網與哈TV行動客服 APP 登入",
+            reply=MEMBER_LOGIN_GUIDANCE_REPLY,
+            reason="model_member_login_contract",
+        )
+    if model_intent in MODEL_ACCOUNT_HOLDER_CHANGE_FEE_INTENTS:
+        return build_direct_reply_decision(
+            intent="account_holder_change_fee_query",
+            topic="變更使用者費用",
+            reply=ACCOUNT_HOLDER_CHANGE_FEE_REPLY,
+            reason="model_account_holder_change_fee_contract",
+        )
+    if model_intent in MODEL_ACCOUNT_HOLDER_CHANGE_DOCUMENT_INTENTS:
+        return build_direct_reply_decision(
+            intent="account_holder_change_required_documents",
+            topic="變更使用者應備證件",
+            reply=ACCOUNT_HOLDER_CHANGE_DOCUMENTS_REPLY,
+            reason="model_account_holder_change_documents_contract",
+        )
+    if model_intent in MODEL_SELF_OWNED_ROUTER_COMPATIBILITY_INTENTS:
+        return build_direct_reply_decision(
+            intent="self_owned_router_compatibility_guidance",
+            topic="自備路由器相容性",
+            reply=SELF_OWNED_ROUTER_COMPATIBILITY_REPLY,
+            reason="model_self_owned_router_compatibility_contract",
+        )
+    if model_intent in MODEL_SELF_OWNED_ROUTER_SETUP_INTENTS:
+        return build_direct_reply_decision(
+            intent="self_owned_router_setup_guidance",
+            topic="自備路由器初始設定",
+            reply=SELF_OWNED_ROUTER_SETUP_REPLY,
+            reason="model_self_owned_router_setup_contract",
+        )
+    if model_intent in MODEL_MODEM_DUAL_ROUTER_INTENTS:
+        return build_direct_reply_decision(
+            intent="modem_dual_router_dhcp_guidance",
+            topic="數據機連接多台路由器",
+            reply=MODEM_DUAL_ROUTER_DHCP_REPLY,
+            reason="model_modem_dual_router_contract",
+        )
+    if model_intent in MODEL_DYNAMIC_IP_COUNT_INTENTS:
+        return build_direct_reply_decision(
+            intent="dynamic_ip_allocation_count",
+            topic="浮動 IP 數量",
+            reply=DYNAMIC_IP_ALLOCATION_COUNT_REPLY,
+            reason="model_dynamic_ip_count_contract",
+        )
+    if model_intent in MODEL_ROUTER_MANUAL_REGISTRATION_INTENTS:
+        return build_direct_reply_decision(
+            intent="router_manual_registration_guidance",
+            topic="路由器手動註冊",
+            reply=ROUTER_MANUAL_REGISTRATION_REPLY,
+            reason="model_router_manual_registration_contract",
+        )
+    if model_intent in MODEL_APPROVED_DIRECT_REPLY_CONTRACTS:
+        topic, reply = MODEL_APPROVED_DIRECT_REPLY_CONTRACTS[model_intent]
+        return build_direct_reply_decision(
+            intent=model_intent,
+            topic=topic,
+            reply=reply,
+            reason=f"model_{model_intent}_contract",
         )
 
-    if is_human_handoff_query(text):
-        if has_human_handoff_issue_context(memory) or has_human_handoff_issue_details(text):
-            return build_human_handoff_request_decision("guard_human_handoff_request")
-        return build_human_handoff_triage_decision("guard_human_handoff_requires_issue")
-
-    # A tentative human-handoff phrase must be confirmed before promotion or
-    # other deterministic rules inspect the same sentence.
-    if is_human_handoff_confirmation_query(text):
-        return build_human_handoff_triage_decision("guard_human_handoff_requires_issue")
-
-    if is_bill_content_query(text):
-        return build_bill_content_query_decision("guard_bill_content_query_rule")
+    repair_offer_active = (
+        known.get("repair_ready") == "yes"
+        or known.get("troubleshooting_failed") == "yes"
+        or (memory.get("clarify_context") or {}).get("type")
+        == "human_handoff_offer"
+    )
+    if (
+        repair_offer_active
+        and guarded.get("route") == "company_info"
+        and (
+            model_intent in {"contact_phone", "company_contact_phone"}
+            or str(guarded.get("topic") or "")
+            in {"contact_phone", "company_contact_phone"}
+        )
+    ):
+        return build_clarify_decision(
+            intent="human_handoff_offer",
+            topic="故障後續處理",
+            reply=(
+                "您的問題需進一步協助處理，可填寫申告維修單，"
+                "或選擇轉真人服務。請問是否需要幫您轉接真人文字客服？"
+            ),
+            reason="repair_offer_blocks_phone_only_reply",
+        )
 
     if (
         guarded.get("route") == "tool_action"
         and guarded.get("tool_name") == "bill_return_line_tv"
-        and any(term in text for term in TV_AUTHORIZATION_TERMS)
+        and known.get("tv_reactivation_status") == "already_temp_restored"
     ):
-        troubleshooting = detect_troubleshooting_query(text, memory)
-        if troubleshooting:
-            troubleshooting["reason"] = "guard_tv_authorization_not_reconnection"
-            return validate_router_result(troubleshooting)
-
-    if is_personal_service_fee_lookup_query(text):
-        return build_tool_action_decision(
-            intent="service_content_query",
-            tool_name="search_contract_info",
-            topic="目前服務費用查詢",
-            reply="可以，我幫您查詢目前服務內容與合約資訊。",
-            reason="guard_personal_service_fee_lookup_rule",
-        )
-
-    indexed_campaign = detect_indexed_campaign_activity_query(text, memory)
-    if indexed_campaign:
-        return indexed_campaign
-
-    # 排錯中短句，一律交回 state machine；明確的人工作業或活動名稱
-    # 已在上方先行處理，避免把使用者切換主題誤當成排錯回答。
-    if known.get("troubleshooting_started") == "yes" and len(text) <= 6:
+        return validate_router_result(build_direct_reply_decision(
+            intent="tv_reactivation_already_temp_restored_followup",
+            topic="電視暫時復線",
+            reply="電視服務已暫時恢復，不會重複送出復線申請。",
+            reason="guard_duplicate_tv_reactivation",
+        ))
+    if (
+        guarded.get("route") == "tool_action"
+        and guarded.get("tool_name") == "create_repair_ticket"
+    ):
+        # Repair is never the first action. The model owns the semantic
+        # classification, while this guard enforces the workflow order:
+        # troubleshoot first, then offer a human handoff after failure.
+        if (
+            known.get("troubleshooting_failed") == "yes"
+            and known.get("repair_ready") == "yes"
+        ):
+            return validate_router_result({
+                "route": "clarify",
+                "intent": "human_handoff_offer",
+                "tool_name": None,
+                "topic": str(guarded.get("topic") or "故障處理"),
+                "should_cancel_current_flow": False,
+                "should_call_tool": False,
+                "should_retrieve_knowledge": False,
+                "knowledge_query": None,
+                "reply": "排除後仍無法恢復，請問是否需要幫您轉接真人文字客服？",
+                "extracted_slots": {},
+                "reason": "guard_repair_failure_requires_handoff_confirmation",
+            })
         guarded.update({
-            "route": "continue_current_flow",
-            "intent": "troubleshooting",
+            "route": (
+                "continue_current_flow"
+                if known.get("troubleshooting_started") == "yes"
+                else "troubleshooting"
+            ),
+            "intent": (
+                "troubleshooting"
+                if known.get("troubleshooting_started") == "yes"
+                else "repair_troubleshooting_intake"
+            ),
             "tool_name": None,
             "should_call_tool": False,
             "should_retrieve_knowledge": False,
             "knowledge_query": None,
             "reply": "",
-            "reason": "guard_troubleshooting_short_reply",
+            "reason": "guard_repair_requires_troubleshooting_first",
         })
-        return validate_router_result(guarded)
-
-    troubleshooting = detect_troubleshooting_query(text, memory)
-    if (
-        troubleshooting
-        and not is_active_flow_switch_check
-        and guarded.get("route") in [None, "", "unknown", "clarify", "company_info", "direct_reply", "knowledge_query"]
-    ):
-        return troubleshooting
-
-    direct_reply = detect_safe_direct_reply(text, memory)
-    if direct_reply:
-        return direct_reply
-
-    if guarded.get("intent") == "human_handoff_triage":
-        return build_human_handoff_triage_decision(
-            guarded.get("reason") or "llm_human_handoff_triage",
-        )
-
-    if guarded.get("intent") in {"human_handoff_request", "human_agent"}:
+    if guarded.get("route") == "tool_action" and guarded.get("tool_name") not in SUPPORTED_TOOLS:
         guarded.update({
-            "route": "direct_reply",
-            "intent": "human_handoff_request",
+            "route": "unsupported_flow",
             "tool_name": None,
             "should_call_tool": False,
             "should_retrieve_knowledge": False,
-            "knowledge_query": None,
-            "reply": WEB_HUMAN_HANDOFF_REPLY,
-            "reason": guarded.get("reason") or "llm_human_handoff_request",
+            "reply": UNSUPPORTED_REPLY,
+            "reason": "guard_unsupported_tool_action",
         })
-        return validate_router_result(guarded)
-
-    if any(term in text for term in TV_AUTHORIZATION_TERMS):
-        troubleshooting = detect_troubleshooting_query(text, memory)
-        if troubleshooting:
-            troubleshooting["reason"] = "guard_tv_authorization_not_reconnection"
-            return troubleshooting
-
-    if (
-        guarded.get("route") == "tool_action"
-        and guarded.get("tool_name") == "bill_return_line_tv"
-        and any(term in text for term in TV_TROUBLESHOOTING_NOT_RECONNECTION_TERMS)
-        and not any(term in text for term in RECONNECTION_INTENT_TERMS)
-    ):
-        direct_reply = detect_safe_direct_reply(text, memory)
-        if direct_reply:
-            return direct_reply
-
-        troubleshooting = detect_troubleshooting_query(text, memory)
-        if troubleshooting:
-            troubleshooting["reason"] = "guard_tv_troubleshooting_not_reconnection"
-            return troubleshooting
-
-    payment_receipt = detect_payment_receipt_query(text, memory)
-    if payment_receipt:
-        return payment_receipt
-
-    promotion_price_difference = detect_promotion_price_difference_query(text, memory)
-    if promotion_price_difference:
-        return promotion_price_difference
-
-    cancel_tv_keep_internet = detect_cancel_tv_keep_internet_query(text, memory)
-    if cancel_tv_keep_internet:
-        return cancel_tv_keep_internet
-
-    fixed_ip = detect_fixed_ip_knowledge_query(text, memory)
-    if fixed_ip and guarded.get("route") in [None, "", "unknown", "company_info", "clarify"]:
-        return fixed_ip
-
-    promotion_activity = detect_promotion_activity_query(text, memory)
-    if promotion_activity:
-        return promotion_activity
-
-    needs_rule_fallback = (
-        guarded.get("route") in [None, "", "unknown"]
-        and not is_active_flow_switch_check
-    )
-
-    if needs_rule_fallback:
-        reconnection = detect_reconnection_query(text, memory)
-        if reconnection:
-            return reconnection
-
-        mabow = detect_mabow_query(text, memory)
-        if mabow:
-            return mabow
-
-        service_availability = detect_service_availability_query(text, memory)
-        if service_availability:
-            return service_availability
-
-        troubleshooting = detect_troubleshooting_query(text, memory)
-        if troubleshooting:
-            return troubleshooting
-
-        company_info = detect_company_info_query(text, memory)
-        if company_info:
-            return company_info
-
-        ambiguous = detect_ambiguous_short_query(text)
-        if ambiguous:
-            return ambiguous
-
-    if is_definition_query(text) and guarded.get("route") in [None, "", "unknown", "clarify"]:
-        return build_definition_query_decision(
-            text=text,
-            reason="guard_definition_query",
-        )
-
-    if guarded.get("route") == "tool_action":
-        if guarded.get("tool_name") not in SUPPORTED_TOOLS:
-            guarded.update({
-                "route": "unsupported_flow",
-                "tool_name": None,
-                "should_call_tool": False,
-                "should_retrieve_knowledge": False,
-                "reply": UNSUPPORTED_REPLY,
-                "reason": "guard_unsupported_tool_action",
-            })
-            return validate_router_result(guarded)
-
-    if guarded.get("route") == "unsupported_flow":
+    elif guarded.get("route") == "unsupported_flow":
         guarded["tool_name"] = None
         guarded["should_call_tool"] = False
         guarded["should_retrieve_knowledge"] = False
         if not guarded.get("reply"):
             guarded["reply"] = UNSUPPORTED_REPLY
-        return validate_router_result(guarded)
-
-    if guarded.get("route") == "knowledge_query":
+    elif guarded.get("route") == "knowledge_query":
         guarded["tool_name"] = None
         guarded["should_call_tool"] = False
         guarded["should_retrieve_knowledge"] = True
         if not guarded.get("knowledge_query"):
             guarded["knowledge_query"] = text
-        return validate_router_result(guarded)
-
-    if guarded.get("route") == "unknown":
+    elif guarded.get("route") == "unknown":
         guarded["reply"] = DEFAULT_UNKNOWN_REPLY
-        return validate_router_result(guarded)
+
+    # A bare authorization message can mean that the customer landed on
+    # an unsubscribed channel. It is not enough evidence to run a
+    # state-changing television reconnection API. Keep the LLM-selected
+    # service scope, but require the channel/authorization SOP first.
+    if (
+        guarded.get("route") == "tool_action"
+        and guarded.get("tool_name") == "bill_return_line_tv"
+        and is_tv_authorization_issue(text)
+    ):
+        return build_troubleshooting_decision(
+            text,
+            "guard_tv_authorization_requires_channel_check",
+        )
+
+    # The model has already interpreted the turn. A receipt barcode can
+    # trigger an account-side action only when the values came from a
+    # verified uploaded image, never from text the customer typed.
+    receipt_evidence = current_verified_receipt_image_evidence(memory, text)
+    if receipt_evidence and guarded.get("tool_name") == "payment_bill_batch":
+        return build_tool_action_decision(
+            intent="payment_receipt_reconnection",
+            tool_name="payment_bill_batch",
+            topic="超商收據復線",
+            reply="",
+            reason="guard_verified_receipt_image_reconnection",
+        )
+    if (
+        guarded.get("tool_name") == "payment_bill_batch"
+    ):
+        return build_direct_reply_decision(
+            intent="payment_receipt_image_required",
+            topic="超商收據復線",
+            reply=(
+                RECEIPT_IMAGE_REUPLOAD_REPLY
+                if is_receipt_image_submission(text, memory)
+                else RECEIPT_IMAGE_REQUIRED_REPLY
+            ),
+            reason=(
+                "guard_receipt_image_ocr_incomplete"
+                if is_receipt_image_submission(text, memory)
+                else "guard_receipt_image_evidence_required"
+            ),
+        )
+
+    # A model-selected handoff is an action contract, not free-form copy.
+    # Keep the model's intent but replace its wording with the canonical
+    # response so Web callers receive a real, signed handoff link.
+    if guarded.get("intent") in {"human_handoff_request", "human_agent"}:
+        known["human_handoff_active"] = "yes"
+        known["human_handoff_topic"] = str(
+            guarded.get("topic") or "真人客服"
+        )
+        memory["known_info"] = known
+        return build_human_handoff_request_decision(
+            str(guarded.get("reason") or "llm_human_handoff_request"),
+            topic=str(guarded.get("topic") or "真人客服"),
+        )
 
     return validate_router_result(guarded)
-
-
-def fallback_router(user_input: str, memory: Dict[str, Any]) -> Dict[str, Any]:
-    """Return a closed routing failure; semantic rule fallback is disabled."""
-    return validate_router_result({
-        "route": "unknown",
-        "intent": "other",
-        "tool_name": None,
-        "topic": (user_input or "").strip(),
-        "should_cancel_current_flow": False,
-        "should_call_tool": False,
-        "should_retrieve_knowledge": False,
-        "knowledge_query": None,
-        "reply": MODEL_ROUTER_UNAVAILABLE_REPLY,
-        "extracted_slots": {},
-        "reason": "model_router_unavailable",
-    })
-
-    # Historical implementation intentionally remains unreachable until its
-    # old test fixtures are removed from the repository.
-    text = (user_input or "").strip()
-
-    entity_confirmation = detect_knowledge_entity_confirmation(text)
-    if entity_confirmation:
-        return entity_confirmation
-
-    if is_human_handoff_query(text):
-        if has_human_handoff_issue_context(memory) or has_human_handoff_issue_details(text):
-            return build_human_handoff_request_decision("fallback_human_handoff_request")
-        return build_human_handoff_triage_decision("fallback_human_handoff_requires_issue")
-
-    if is_human_handoff_confirmation_query(text):
-        return build_human_handoff_triage_decision("fallback_human_handoff_requires_issue")
-
-    payment_receipt = detect_payment_receipt_query(text, memory)
-    if payment_receipt:
-        return payment_receipt
-
-    direct_reply = detect_safe_direct_reply(text, memory)
-    if direct_reply:
-        return direct_reply
-
-    equipment_purchase = detect_equipment_purchase_knowledge_query(text)
-    if equipment_purchase:
-        equipment_purchase["reason"] = "fallback_equipment_purchase_knowledge_rule"
-        return validate_router_result(equipment_purchase)
-
-    service_device_limit = detect_service_device_limit_knowledge_query(text)
-    if service_device_limit:
-        service_device_limit["reason"] = "fallback_service_device_limit_knowledge_rule"
-        return validate_router_result(service_device_limit)
-
-    troubleshooting = detect_troubleshooting_query(text, memory)
-    if troubleshooting:
-        return troubleshooting
-
-    value_added_product = detect_value_added_product_knowledge_query(text)
-    if value_added_product:
-        value_added_product["reason"] = "fallback_value_added_product_knowledge_rule"
-        return validate_router_result(value_added_product)
-
-    promotion_price_difference = detect_promotion_price_difference_query(text, memory)
-    if promotion_price_difference:
-        return promotion_price_difference
-
-    cancel_tv_keep_internet = detect_cancel_tv_keep_internet_query(text, memory)
-    if cancel_tv_keep_internet:
-        return cancel_tv_keep_internet
-
-    fixed_ip = detect_fixed_ip_knowledge_query(text, memory)
-    if fixed_ip:
-        return fixed_ip
-
-    promotion_activity = detect_promotion_activity_query(text, memory)
-    if promotion_activity:
-        return promotion_activity
-
-    reconnection = detect_reconnection_query(text, memory)
-    if reconnection:
-        return reconnection
-
-    mabow = detect_mabow_query(text, memory)
-    if mabow:
-        return mabow
-
-    service_availability = detect_service_availability_query(text, memory)
-    if service_availability:
-        return service_availability
-
-    if is_contextual_website_page_request(text):
-        return build_contextual_website_page_decision(
-            text,
-            "fallback_contextual_website_page_lookup",
-        )
-
-    company_info = detect_company_info_query(text, memory)
-    if company_info:
-        return company_info
-
-    ambiguous = detect_ambiguous_short_query(text)
-    if ambiguous:
-        return ambiguous
-
-    if is_definition_query(text):
-        return build_definition_query_decision(
-            text=text,
-            reason="fallback_definition_query",
-        )
-
-    smalltalk_reply = SMALLTALK_REPLIES.get(text.lower())
-    if smalltalk_reply:
-        return validate_router_result({
-            "route": "smalltalk",
-            "intent": "smalltalk",
-            "tool_name": None,
-            "topic": text,
-            "should_cancel_current_flow": False,
-            "should_call_tool": False,
-            "should_retrieve_knowledge": False,
-            "knowledge_query": None,
-            "reply": smalltalk_reply,
-            "extracted_slots": {},
-            "reason": "fallback_smalltalk",
-        })
-
-    return validate_router_result({
-        "route": "unknown",
-        "intent": "other",
-        "tool_name": None,
-        "topic": text,
-        "should_cancel_current_flow": False,
-        "should_call_tool": False,
-        "should_retrieve_knowledge": False,
-        "knowledge_query": None,
-        "reply": MODEL_ROUTER_UNAVAILABLE_REPLY,
-        "extracted_slots": {},
-        "reason": "fallback_safe_unknown",
-    })
 
 
 def is_paper_bill_request(text: str) -> bool:
@@ -7783,241 +5022,6 @@ def is_paper_to_electronic_bill_change_query(text: str) -> bool:
     return has_paper_bill and has_electronic_bill and has_change_request
 
 
-def detect_paper_bill_request_rule(
-    text: str,
-    memory: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
-    if not is_paper_bill_request(text):
-        return None
-
-    return build_direct_reply_decision(
-        intent="paper_bill_request",
-        topic="paper_bill",
-        reply=PAPER_BILL_REQUEST_REPLY,
-        reason="paper_bill_request_rule",
-    )
-
-
-def detect_active_flow_rule_interrupt(
-    text: str,
-    memory: Optional[Dict[str, Any]] = None,
-    history: Optional[List[Dict[str, str]]] = None,
-) -> Optional[Dict[str, Any]]:
-    """Match only router rules that may replace an active customer flow."""
-    memory = memory or {}
-    history = history or []
-
-    for detector in (
-        lambda: detect_paper_bill_request_rule(text, memory),
-        lambda: detect_company_info_interrupt_query(text, memory),
-        lambda: detect_contextual_feedback_direct_reply(text, history, memory),
-        lambda: detect_safe_direct_reply(text, memory),
-    ):
-        decision = detector()
-        if decision:
-            return decision
-
-    return None
-
-
-def detect_fault_rule(text: str, memory: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-    memory = memory or {}
-    known = memory.get("known_info", {})
-    if (
-        memory.get("pending_tool")
-        or memory.get("_active_flow_switch_check")
-        or known.get("troubleshooting_started") == "yes"
-        or known.get("repair_followup_active") == "yes"
-        or detect_equipment_purchase_knowledge_query(text)
-        or detect_value_added_product_knowledge_query(text)
-    ):
-        return None
-
-    direct_reply = detect_safe_direct_reply(text, memory)
-    if direct_reply and direct_reply.get("intent") not in {"network_instability_scope_clarification"} and not (
-        is_tv_authorization_issue(text)
-        and direct_reply.get("intent")
-        not in {"cnt_seasonal_authorization_paid", "general_channel_e004_authorization"}
-    ):
-        return None
-
-    if is_fault(text) or is_direct_fault_report(text):
-        return detect_troubleshooting_query(text, memory)
-
-    return None
-
-
-def detect_llm_failure_semantic_route(
-    text: str,
-    memory: Dict[str, Any],
-    history: List[Dict[str, str]],
-) -> Optional[Dict[str, Any]]:
-    """Ground malformed model output in a flow, never in a canned answer."""
-    compact = (text or "").replace(" ", "").replace("　", "").lower()
-    recent = "".join(str(item.get("content") or "") for item in (history or [])[-8:])
-    recent_compact = recent.replace(" ", "").replace("　", "").lower()
-
-    if (
-        "100m" in compact
-        and any(term in compact for term in ("電視", "頻道"))
-        and any(term in compact for term in ("多少錢", "費用", "月租", "一個月"))
-    ):
-        return build_clarify_decision(
-            intent="existing_service_or_combo_plan_clarification",
-            topic="100M 電視加網路費用",
-            reply="請問您是想查詢目前合約的月費，還是想了解 100M 電視加網路的優惠方案？",
-            reason="llm_failure_semantic_existing_service_or_combo_plan_clarification",
-        )
-
-    if any(term in compact for term in ("套餐", "全餐")) and re.search(r"[a-z]", text or "", flags=re.IGNORECASE):
-        return build_knowledge_query_decision(
-            intent="digital_tv_package_addon",
-            topic="數位電視套餐",
-            knowledge_query=f"{text} 數位電視套餐 加購流程 申請方式",
-            reason="llm_failure_semantic_digital_package_retrieval",
-        )
-
-    if any(term in compact for term in ("500m", "500mbps")) and any(
-        term in compact for term in ("費用", "多少錢", "價格", "價錢", "月租")
-    ):
-        return build_knowledge_query_decision(
-            intent="broadband_500m_plan_price_query",
-            topic="500M 寬頻方案費用",
-            knowledge_query=f"{text} 一般寬頻 目前促銷方案 費用 月繳 季繳 半年繳 年繳",
-            reason="llm_failure_semantic_500m_retrieval",
-        )
-
-    if any(term in compact for term in ("再高一階", "高一階", "升一階", "升級一階")):
-        speed_matches = re.findall(
-            r"(?:下載\s*)?(\d+)\s*(?:mbps|m)\s*/\s*(?:上傳\s*)?(\d+)\s*(?:mbps|m)",
-            recent,
-            flags=re.IGNORECASE,
-        )
-        current_speed = (
-            f"目前速率 {speed_matches[-1][0]}M/{speed_matches[-1][1]}M"
-            if speed_matches
-            else ""
-        )
-        return build_knowledge_query_decision(
-            intent="next_tier_plan_fee_guidance",
-            topic="寬頻升級方案費用",
-            knowledge_query=(
-                f"{current_speed} {text} 目前可推廣寬頻方案 "
-                "升級下一階速率 費用 方案內容 合約資格"
-            ).strip(),
-            reason="llm_failure_semantic_upgrade_retrieval",
-        )
-
-    if compact in {"2年的呢", "兩年的呢", "2年呢", "兩年呢"} and any(
-        term in recent_compact for term in ("第四台", "有線電視", "收視費")
-    ):
-        return build_knowledge_query_decision(
-            intent="basic_tv_two_year_fee_query",
-            topic="第四台兩年繳費用",
-            knowledge_query="第四台 有線電視 兩年繳 收視費 裝機費",
-            reason="llm_failure_semantic_tv_two_year_retrieval",
-        )
-
-    if any(term in compact for term in ("300kbps", "網速", "網路速度")) and any(
-        term in compact for term in ("維修", "報修", "人員", "慢")
-    ):
-        return build_troubleshooting_decision(text, "llm_failure_semantic_network_repair")
-
-    if compact in {"如何申請", "怎麼申請", "申請方式", "如何辦理", "怎麼辦理"} and any(
-        term in recent_compact for term in ("優惠", "方案", "促銷")
-    ):
-        return build_human_handoff_request_decision(
-            "llm_failure_semantic_promotion_application_handoff",
-            topic="優惠方案申請",
-        )
-
-    if any(term in compact for term in ("年繳", "全部費用", "總費用")) and any(
-        term in recent_compact for term in ("優惠", "方案", "促銷")
-    ):
-        recent_customer_topics = [
-            str(item.get("content") or "").strip()
-            for item in history or []
-            if str(item.get("role") or "").lower() == "user"
-            and str(item.get("content") or "").strip()
-        ]
-        topic_anchor = recent_customer_topics[-1] if recent_customer_topics else ""
-        return build_knowledge_query_decision(
-            intent="campaign_payment_detail",
-            topic="目前方案費用",
-            knowledge_query=f"{topic_anchor} {text} 年繳 全部費用 裝機費",
-            reason="llm_failure_semantic_campaign_fee_retrieval",
-        )
-
-    return None
-
-
-def detect_digital_tv_package_knowledge_guard(
-    text: str,
-    router: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
-    """Keep an unresolved package-purchase intent in the digital-TV KB flow.
-
-    This runs only after the LLM has evaluated the message and only repairs an
-    unresolved clarification/unknown result. It deliberately returns a
-    knowledge-query contract, never a customer-facing canned answer.
-    """
-    if str(router.get("route") or "") not in {"unknown", "clarify"}:
-        return None
-
-    compact = (text or "").replace(" ", "").replace("　", "").casefold()
-    generic_package_purchase = compact in {
-        "套餐如何加購",
-        "套餐怎麼加購",
-        "套餐怎麼購買",
-        "如何加購套餐",
-        "套餐購買流程",
-    }
-    named_full_package = (
-        "全餐" in compact
-        and bool(re.search(r"[a-z]", text or "", flags=re.IGNORECASE))
-    )
-    if not (generic_package_purchase or named_full_package):
-        return None
-
-    subject = str(text or "").strip() if named_full_package else "數位電視頻道套餐"
-    return build_knowledge_query_decision(
-        intent="digital_tv_package_addon",
-        topic="數位電視套餐",
-        knowledge_query=(
-            f"{subject} 數位電視套餐 數位電視頻道套餐 加購流程 聯網機上盒 非聯網機上盒"
-        ),
-        reason="llm_guard_digital_tv_package_addon_retrieval",
-    )
-
-
-def detect_convenience_store_payment_machine_guard(
-    text: str,
-    router: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
-    """Send an unresolved convenience-store payment request to the machine SOP."""
-    if str(router.get("route") or "") not in {"unknown", "clarify"}:
-        return None
-
-    compact = (text or "").replace(" ", "").replace("　", "")
-    if compact not in {
-        "無法在便利商店繳費",
-        "無法在超商繳費",
-        "超商繳費不會操作",
-        "便利商店繳費不會操作",
-    }:
-        return None
-
-    return build_knowledge_query_decision(
-        intent="convenience_store_payment_machine_guide",
-        topic="超商繳費機操作",
-        knowledge_query=(
-            "IBON FamiPort ibon famiport 超商繳費機 便利商店機台 "
-            "繳費教學 操作流程 7-Eleven 全家"
-        ),
-        reason="llm_guard_convenience_store_payment_machine_retrieval",
-    )
-
-
 def run_intent_router(
     user_input: str,
     memory: Dict[str, Any],
@@ -8035,23 +5039,23 @@ def run_intent_router(
     )
 
     try:
+        runtime_modules = select_runtime_prompt_modules(
+            user_input,
+            memory,
+            history,
+        )
+        runtime_rules = build_contextual_runtime_intent_router_rules(
+            user_input,
+            memory,
+            history,
+            modules=runtime_modules,
+        )
         regional_policy_rules = build_policy_prompt(
             memory,
-            (
-                "promotion.social_discount_stacking",
-                "promotion.discount_stacking_caution",
-                "promotion.hidden_plan_visibility",
-                "promotion.non_promoted_1g_plan",
-                "promotion.low_income_500m_year_fee",
-                "billing.next_bill_after_no_unpaid",
-                "billing.past_payment_record",
-                "billing.payment_not_posted",
-                "billing.store_payment_still_billed",
-                "support.remote_control_price",
-            ),
+            select_runtime_policy_keys(runtime_modules),
         )
         response = (prompt | llm).invoke({
-            "rules": f"{INTENT_ROUTER_RULES}\n\n{regional_policy_rules}",
+            "rules": f"{runtime_rules}\n\n{regional_policy_rules}",
             "company_context": build_company_context(memory.get("company_code", DEFAULT_TV_CABLE)),
             "memory_summary": build_memory_summary(memory),
             "history_text": history_text,
@@ -8064,7 +5068,6 @@ def run_intent_router(
                 user_input,
                 memory,
                 decision,
-                llm_first=True,
             )
             if guarded_decision.get("route") != "unknown":
                 return guarded_decision
@@ -8084,9 +5087,9 @@ def run_intent_router(
         "extracted_slots": {},
         "reason": "model_router_unavailable",
     })
-    return router_guard(
+    guarded_fallback = router_guard(
         user_input,
         memory,
         fallback_decision,
-        llm_first=True,
     )
+    return guarded_fallback

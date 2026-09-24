@@ -10,10 +10,10 @@
 
 - WEB 正式串接走 `POST /api/v1/chat`，外部傳 `user_id`、`company_code`、`msg`、`is_logged_in`，若有 CUST_API 客戶編號另傳 `custnum`，由本系統保存 `chat_logs` 與 `ai_state`。
 - LINE 多 Bot 入口仍保留本機 session 與 chat logs，並透過 `customer_profiles` 同步同一 LINE 使用者已確認的系統台。
-- 每一則新的客戶訊息皆由 LLM-first Router 判斷意圖；模型無法判讀時回固定暫時無法判讀訊息，不退回舊規則回答。
+- 每次需要新語意判斷時由 LLM-first Router 決定意圖；既有排錯、工具與授權狀態由狀態機承接。模型無法判讀時回固定暫時無法判讀訊息，不退回舊規則回答。
 - RAG 使用本地 ChromaDB 與文件上傳維護流程；回答前需通過對題與服務證據檢查。
 - Ollama fallback 以遠端 Ollama 服務為目標，由 `OLLAMA_BASE_URL` 指定。
-- 報修與取消報修流程目前停用；用戶在排錯中拒絕、無法確認或表示沒用時，Web 會直接告知暫停服務並附上維修申告連結，LINE 轉真人客服模式。
+- 對話不直接建立或取消報修工單；先引導安全排錯。排錯失敗或客戶明確無法操作時，提供維修申告表單並詢問是否轉真人，只有同意後才轉接。
 - Web UI 可維護系統台公司資訊，包含地址電話、營業時間、服務地區、區域故障、公司網址與加值服務網址。
 - 本機 SQLite 目前只作為測試/LINE 狀態保存與 MongoDB-style repository 模擬。
 

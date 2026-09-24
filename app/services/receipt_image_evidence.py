@@ -88,6 +88,7 @@ def evaluate_store_receipt_ocr(ocr_text: str) -> Dict[str, Any]:
     compact = _compact(value)
     store_markers = (
         "7-11",
+        "7-eleven",
         "7eleven",
         "seveneleven",
         "全家",

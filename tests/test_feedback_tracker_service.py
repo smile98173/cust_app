@@ -7,6 +7,129 @@ from app.services import feedback_tracker_service
 
 
 class FeedbackTrackerConversationLogTest(unittest.TestCase):
+    def test_pending_feedback_can_be_edited_without_changing_original(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "feedback_tracker.db"
+            with patch.object(feedback_tracker_service, "TRACKER_DB_FILE", database_path), \
+                    patch.object(feedback_tracker_service, "migrate_legacy_tracker_data"):
+                record = {
+                    "feedback_id": "FB-EDIT", "user_id": "test-user",
+                    "suggestion": "原始客服回饋", "created_at": "2026-09-24T10:00:00",
+                }
+                feedback_tracker_service.import_feedback_records([record])
+                feedback_tracker_service.edit_pending_feedback_suggestion(
+                    "FB-EDIT", "  修訂後客服回饋  ", "csr"
+                )
+                self.assertEqual(feedback_tracker_service.import_feedback_records([record]), 0)
+                item = feedback_tracker_service.list_feedback_items(start_date="2026-09-24")[0]
+                bundle = feedback_tracker_service.build_tracking_update_bundle()
+                conn = feedback_tracker_service.tracker_db_conn()
+                try:
+                    original = conn.execute(
+                        "SELECT suggestion FROM feedback_records WHERE feedback_id='FB-EDIT'"
+                    ).fetchone()["suggestion"]
+                finally:
+                    conn.close()
+
+        self.assertEqual(item["suggestion"], "修訂後客服回饋")
+        self.assertEqual(item["original_suggestion"], original)
+        self.assertEqual(original, "原始客服回饋")
+        self.assertEqual(bundle["feedback_states"][0]["edited_suggestion"], "修訂後客服回饋")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "remote_tracker.db"
+            with patch.object(feedback_tracker_service, "TRACKER_DB_FILE", database_path), \
+                    patch.object(feedback_tracker_service, "migrate_legacy_tracker_data"):
+                feedback_tracker_service.import_feedback_records([record])
+                feedback_tracker_service.apply_tracking_update_bundle(bundle)
+                synced = feedback_tracker_service.list_feedback_items(start_date="2026-09-24")
+        self.assertEqual(synced[0]["suggestion"], "修訂後客服回饋")
+
+    def test_pending_feedback_delete_survives_reimport_and_sync(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "feedback_tracker.db"
+            with patch.object(feedback_tracker_service, "TRACKER_DB_FILE", database_path), \
+                    patch.object(feedback_tracker_service, "migrate_legacy_tracker_data"):
+                record = {
+                    "feedback_id": "FB-DELETE", "user_id": "test-user",
+                    "suggestion": "原始客服回饋", "created_at": "2026-09-24T10:00:00",
+                }
+                feedback_tracker_service.import_feedback_records([record])
+                feedback_tracker_service.delete_pending_feedback("FB-DELETE", "csr")
+                feedback_tracker_service.import_feedback_records([record])
+                newer_bundle = {
+                    "kind": "feedback_tracker_updates", "case_definitions": [], "case_states": [],
+                    "feedback_states": [{
+                        "feedback_id": "FB-DELETE", "status": "pending",
+                        "review_status": "pending", "updated_at": "9999-01-01T00:00:00",
+                    }],
+                }
+                feedback_tracker_service.apply_tracking_update_bundle(newer_bundle)
+                visible = feedback_tracker_service.list_feedback_items(start_date="2026-09-24")
+                bundle = feedback_tracker_service.build_tracking_update_bundle()
+                conn = feedback_tracker_service.tracker_db_conn()
+                try:
+                    original_count = conn.execute(
+                        "SELECT COUNT(*) FROM feedback_records WHERE feedback_id='FB-DELETE'"
+                    ).fetchone()[0]
+                finally:
+                    conn.close()
+
+        self.assertEqual(visible, [])
+        self.assertEqual(original_count, 1)
+        self.assertTrue(bundle["feedback_states"][0]["deleted_at"])
+
+    def test_only_pending_fix_feedback_can_be_edited_or_deleted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "feedback_tracker.db"
+            with patch.object(feedback_tracker_service, "TRACKER_DB_FILE", database_path), \
+                    patch.object(feedback_tracker_service, "migrate_legacy_tracker_data"):
+                feedback_tracker_service.import_feedback_records([{
+                    "feedback_id": "FB-ACCEPTED", "user_id": "test-user",
+                    "suggestion": "原始客服回饋", "created_at": "2026-09-24T10:00:00",
+                }])
+                feedback_tracker_service.update_feedback_item(
+                    "FB-ACCEPTED", {"status": "processed", "review_status": "passed"}, "csr"
+                )
+                with self.assertRaises(ValueError):
+                    feedback_tracker_service.edit_pending_feedback_suggestion(
+                        "FB-ACCEPTED", "新的回饋", "csr"
+                    )
+                with self.assertRaises(ValueError):
+                    feedback_tracker_service.delete_pending_feedback("FB-ACCEPTED", "csr")
+                with self.assertRaises(ValueError):
+                    feedback_tracker_service.edit_pending_feedback_suggestion(
+                        "FB-ACCEPTED", "   ", "csr"
+                    )
+                with self.assertRaises(LookupError):
+                    feedback_tracker_service.delete_pending_feedback("FB-MISSING", "csr")
+
+    def test_pending_feedback_api_edit_and_delete(self):
+        from fastapi.testclient import TestClient
+        import app.app_backend as app_backend
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "feedback_tracker.db"
+            with patch.object(feedback_tracker_service, "TRACKER_DB_FILE", database_path), \
+                    patch.object(feedback_tracker_service, "migrate_legacy_tracker_data"), \
+                    patch.object(app_backend, "api_auth_enabled", return_value=False), \
+                    patch.object(app_backend, "require_feedback_permission", return_value={"username": "csr"}):
+                feedback_tracker_service.import_feedback_records([{
+                    "feedback_id": "FB-API", "user_id": "test-user",
+                    "suggestion": "原始客服回饋", "created_at": "2026-09-24T10:00:00",
+                }])
+                client = TestClient(app_backend.app)
+                edited = client.patch(
+                    "/api/feedback-tracker/feedback/FB-API/suggestion",
+                    json={"suggestion": "更新後的回饋"},
+                )
+                deleted = client.delete("/api/feedback-tracker/feedback/FB-API")
+                deleted_again = client.delete("/api/feedback-tracker/feedback/FB-API")
+
+        self.assertEqual(edited.status_code, 200)
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted_again.status_code, 404)
+
     def test_legacy_ai_verdicts_become_processing_statuses(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = Path(temp_dir) / "feedback_tracker.db"

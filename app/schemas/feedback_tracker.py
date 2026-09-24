@@ -14,6 +14,10 @@ class FeedbackTrackerUpdateRequest(BaseModel):
     adjusted_conversation: Optional[list[dict[str, Any]]] = None
 
 
+class FeedbackSuggestionUpdateRequest(BaseModel):
+    suggestion: str = Field(min_length=1)
+
+
 class RegressionCaseUpdateRequest(BaseModel):
     status: str = Field(default="ready_for_review")
     owner: Optional[str] = None

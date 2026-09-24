@@ -113,6 +113,10 @@ class RouterDecision(BaseModel):
     selected_option_id: Optional[str] = None
     target_document_id: Optional[str] = None
     target_knowledge_base: Optional[str] = None
+    # Keep clarification choices structured so display does not depend on the
+    # model producing flawless Markdown numbering in ``reply``.
+    clarification_question: Optional[str] = None
+    clarification_options: list[str] = Field(default_factory=list)
     reply: str = ""
     extracted_slots: RouterSlots = Field(default_factory=RouterSlots)
     reason: str = ""
@@ -195,6 +199,25 @@ class RouterDecision(BaseModel):
         # model may emit; validated conversation context hydrates them later.
         normalized["target_document_id"] = None
         normalized["target_knowledge_base"] = None
+
+        clarification_question = normalized.get("clarification_question")
+        normalized["clarification_question"] = (
+            clarification_question.strip()[:240]
+            if route == "clarify"
+            and isinstance(clarification_question, str)
+            and clarification_question.strip()
+            else None
+        )
+        raw_options = normalized.get("clarification_options")
+        normalized["clarification_options"] = (
+            [
+                option.strip()[:120]
+                for option in raw_options[:8]
+                if isinstance(option, str) and option.strip()
+            ]
+            if route == "clarify" and isinstance(raw_options, list)
+            else []
+        )
 
         matched_rule_id = normalized.get("matched_rule_id")
         if not isinstance(matched_rule_id, str) or not matched_rule_id.strip():

@@ -17,6 +17,7 @@ from app.handlers.chat_handler import (
     build_promotion_catalog_reply,
     compose_knowledge_reply,
     filter_docs_with_llm_evidence,
+    finalize_customer_reply,
     format_customer_reply_text,
     remember_campaign_topic,
 )
@@ -525,6 +526,7 @@ class KBServiceTest(unittest.TestCase):
         )
 
         self.assertEqual(memory["last_campaign_topic"], "爸氣獻禮")
+        self.assertEqual(memory["known_info"]["last_campaign_topic"], "爸氣獻禮")
 
     def test_campaign_cost_followup_keeps_dynamic_campaign_context(self):
         query = build_contextual_knowledge_query(
@@ -4680,34 +4682,6 @@ class KBServiceTest(unittest.TestCase):
                 ["大屯"],
             )
 
-    @unittest.skip(
-        "Archived legacy path: broad promotion questions are clarified by the model router before retrieval."
-    )
-    def test_compose_knowledge_reply_summarizes_long_rag_answer(self):
-        calls = []
-        llm = RunnableLambda(
-            lambda payload: calls.append(payload)
-            or AIMessage(content="目前查到的優惠重點：\n1. 寬頻搭 LINE TV 半年。\n2. 可借用 OTT 盒子。\n3. 詳細月租與限制需由客服確認。")
-        )
-        long_answer = (
-            "贈品(包含加值服務)：143 清冰組+LINE TV半年 售戶是否可參加：可參加 "
-            "條件：本身需無合約 租借：租借WiFi一台+居家安全攝影機一台 注意事項："
-            "1、售戶盡量不主推，價格問題可推 2、派工請派..."
-        ) * 3
-
-        reply = compose_knowledge_reply(
-            "優惠套餐有哪些?",
-            "",
-            [{"id": "chunk-1", "question": "優惠套餐", "answer": long_answer}],
-            llm=llm,
-            answer_guard_query="優惠套餐有哪些?",
-            memory={"company_code": "tdtv"},
-        )
-
-        self.assertIn("目前查到的優惠重點", reply)
-        self.assertIn("LINE TV", reply)
-        self.assertEqual(len(calls), 1)
-
     def test_compose_knowledge_reply_summarizes_short_rag_answer_too(self):
         calls = []
         llm = RunnableLambda(
@@ -4844,6 +4818,23 @@ class KBServiceTest(unittest.TestCase):
         self.assertIn("\n5. IBON 及 FamiPort 繳費", reply)
         self.assertIn("\n貼心提醒：\n繳費後請重新開機。", reply)
 
+    def test_format_customer_reply_text_repairs_missing_space_after_list_marker(self):
+        raw = "請選擇服務：\n1. 純網路\n2. 純有線電視\n3.有線電視＋網路"
+
+        reply = format_customer_reply_text(raw)
+
+        self.assertEqual(
+            reply,
+            "請選擇服務：\n1. 純網路\n2. 純有線電視\n3. 有線電視＋網路",
+        )
+
+    def test_finalize_customer_reply_keeps_repaired_list_marker_spacing(self):
+        raw = "請選擇方案：\n1. 純網路\n2. 純有線電視\n3.有線電視＋網路"
+
+        reply = finalize_customer_reply("想換方案", raw)
+
+        self.assertIn("\n3. 有線電視＋網路", reply)
+
     def test_format_customer_reply_text_splits_plain_campaign_sections(self):
         raw = (
             "方案名稱：好視成雙 NO8 活動期間：115.06.10~115.08.31 "
@@ -4937,6 +4928,29 @@ class KBServiceTest(unittest.TestCase):
         self.assertIn("\n第 6 台含以上：需加購 $100 元以上套餐，且需每年續繳。", reply)
         self.assertNotIn("\n2. 第 3 台起", reply)
         self.assertNotIn("\n3. 分機施工費", reply)
+
+    def test_format_customer_reply_text_removes_orphan_list_markers(self):
+        raw = (
+            "必要條件：\n"
+            "-\n"
+            "活動期間：115/08/01~115/09/30\n"
+            "*\n"
+            "裝機費：500 元\n"
+            "+\n"
+            "網路設備押金：1,000 元"
+        )
+
+        reply = format_customer_reply_text(raw)
+
+        self.assertEqual(
+            reply,
+            (
+                "必要條件：\n"
+                "活動期間：115/08/01~115/09/30\n"
+                "裝機費：500 元\n"
+                "網路設備押金：1,000 元"
+            ),
+        )
 
     def test_compose_knowledge_reply_falls_back_to_raw_answer_when_summary_fails(self):
         class FailingLLM:

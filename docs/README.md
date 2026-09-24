@@ -1,9 +1,10 @@
 # 文件索引
 
-最後整理：2026-09-18
+最後整理：2026-09-24
 
 ## 現行操作文件
 
+- [`main_program_architecture_quickstart.md`](main_program_architecture_quickstart.md)：新維護者的 15 分鐘主程式架構導覽，包含訊息流、核心檔案、常見修改地圖與最小驗證方式。
 - `active_customer_service_handoff_2026-09-14.md`：客服 AI 的現行架構、規則邊界、知識庫原則與真實 API 回歸測試方式。修改客服回答行為前優先閱讀。
 - `customer_reply_alignment_2026-09-16.md`：客服建議轉成回答契約的現行規則、線上知識資料維護欄位，以及「待整理」案例的恢復驗證流程。調整線上資料或回饋案例前必讀。
 - `feedback_backlog_organization_2026-09-18.md`：164 筆待整理回饋壓縮為 55 組專業案例的規則、追蹤方式與後續驗證邊界。

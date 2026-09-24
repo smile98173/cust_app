@@ -29,6 +29,7 @@ from app.schemas.chat import (
     WebChatRequest,
 )
 from app.schemas.feedback_tracker import (
+    FeedbackSuggestionUpdateRequest,
     FeedbackTrackerUpdateRequest,
     RegressionCaseUpdateRequest,
 )
@@ -47,6 +48,8 @@ from app.services.feedback_tracker_service import (
     apply_tracking_update_bundle,
     bootstrap_tracker_data,
     build_tracking_state_bundle,
+    delete_pending_feedback,
+    edit_pending_feedback_suggestion,
     list_feedback_items,
     list_regression_cases,
     load_conversation_log_records,
@@ -2643,6 +2646,34 @@ async def update_feedback_tracker_item(
     account = require_feedback_permission(request)
     actor = str((account or {}).get("username") or "system")
     return update_feedback_item(feedback_id, payload.model_dump(), actor)
+
+
+@app.patch("/api/feedback-tracker/feedback/{feedback_id}/suggestion")
+async def edit_feedback_tracker_suggestion(
+    feedback_id: str,
+    payload: FeedbackSuggestionUpdateRequest,
+    request: Request,
+):
+    account = require_feedback_permission(request)
+    actor = str((account or {}).get("username") or "system")
+    try:
+        return edit_pending_feedback_suggestion(feedback_id, payload.suggestion, actor)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.delete("/api/feedback-tracker/feedback/{feedback_id}")
+async def delete_feedback_tracker_item(feedback_id: str, request: Request):
+    account = require_feedback_permission(request)
+    actor = str((account or {}).get("username") or "system")
+    try:
+        return delete_pending_feedback(feedback_id, actor)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.put("/api/feedback-tracker/cases/{case_id}")

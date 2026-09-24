@@ -5,7 +5,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.handlers.chat_handler import apply_customer_reply_policies
-from app.services.intent_router import detect_safe_direct_reply
 from app.services.regional_policy import (
     REGION_CENTRAL,
     REGION_JIANNAN,
@@ -67,8 +66,8 @@ class RegionalPolicyTest(unittest.TestCase):
                     "company_code": "hya",
                     "last_bill_query_status": {"status": "no_unpaid"},
                 }
-                central = detect_safe_direct_reply("下期帳單", central_memory)
-                jiannan = detect_safe_direct_reply("下期帳單", jiannan_memory)
+                central = get_policy_rule(central_memory, "billing.next_bill_after_no_unpaid")
+                jiannan = get_policy_rule(jiannan_memory, "billing.next_bill_after_no_unpaid")
 
         self.assertEqual(central["reply"], "中區下期帳單回覆")
         self.assertEqual(jiannan["reply"], "嘉南區下期帳單回覆")

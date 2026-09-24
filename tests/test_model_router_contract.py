@@ -4,9 +4,16 @@ from unittest.mock import patch
 
 from langchain_core.runnables import RunnableLambda
 
-from app.handlers.chat_handler import handle_chat_message, resolve_model_selected_context
+from app.handlers.chat_handler import (
+    build_clarify_context,
+    build_plan_from_router,
+    handle_chat_message,
+    resolve_model_selected_context,
+)
+from app.schemas.router import RouterDecision
 from app.services.intent_router import router_guard, run_intent_router
 from app.services.router_catalog import get_clarify_context
+from app.services.router_prompt import build_contextual_runtime_intent_router_rules
 
 
 class Response:
@@ -33,6 +40,109 @@ def model_response(**overrides):
 
 
 class ModelRouterContractTest(unittest.TestCase):
+    def test_router_prompt_requests_structured_clarification_options(self):
+        rules = build_contextual_runtime_intent_router_rules(
+            "有線電視還是網路？",
+            {"company_code": "tdtv", "known_info": {}},
+            [],
+        )
+
+        self.assertIn("clarification_question", rules)
+        self.assertIn("clarification_options", rules)
+        self.assertIn("依順序填完整純文字選項", rules)
+
+    def test_structured_clarification_options_render_as_complete_numbered_list(self):
+        router = RouterDecision.from_raw(
+            {
+                "route": "clarify",
+                "intent": "plan_change_scope_clarification",
+                "clarification_question": "請問您想更換哪一類服務？",
+                "clarification_options": [
+                    "1. 純網路",
+                    "純有線電視",
+                    "有線電視＋網路",
+                    "已有指定方案想更換",
+                ],
+                "reply": "模型的非結構化回覆",
+            },
+            supported_tools=(),
+        ).to_router_dict()
+
+        reply = build_plan_from_router(router)["reply"]
+
+        self.assertEqual(
+            reply,
+            "請問您想更換哪一類服務？\n"
+            "1. 純網路\n"
+            "2. 純有線電視\n"
+            "3. 有線電視＋網路\n"
+            "4. 已有指定方案想更換",
+        )
+
+    def test_contract_change_clarification_uses_catalog_options_when_model_omits_structure(self):
+        router = RouterDecision.from_raw(
+            {
+                "route": "clarify",
+                "intent": "contract_expired_plan_change_clarify",
+                "reply": (
+                    "請問您想轉換成哪一類新方案？\n"
+                    "1. 純網路\n2. 純有線電視\n3.有線電視＋網路\n已有指定方案"
+                ),
+            },
+            supported_tools=(),
+        ).to_router_dict()
+
+        plan = build_plan_from_router(router)
+        context = build_clarify_context(router)
+
+        self.assertEqual(
+            plan["reply"],
+            "請問您想轉換成哪一類新方案？\n"
+            "1. 純網路\n"
+            "2. 純有線電視\n"
+            "3. 有線電視＋網路\n"
+            "4. 已有指定方案",
+        )
+        self.assertEqual(context["topic"], "方案轉換目標")
+        self.assertEqual(list(context["options"]), [
+            "純網路",
+            "純有線電視",
+            "有線電視＋網路",
+            "已有指定方案",
+        ])
+
+    def test_chat_entrypoint_repairs_incomplete_contract_change_option_list(self):
+        def incomplete_clarification(_prompt):
+            return model_response(
+                route="clarify",
+                intent="contract_expired_plan_change_clarify",
+                should_retrieve_knowledge=False,
+                knowledge_query=None,
+                reply=(
+                    "請問您想轉換成哪一類新方案？\n"
+                    "1. 純網路\n2. 有線電視\n3.有線電視＋網路\n已有指定方案"
+                ),
+            )
+
+        with patch("app.handlers.chat_handler.log_chat_latency"):
+            result = handle_chat_message(
+                user_id="contract-change-clarify-layout-test",
+                user_text="原本合約已到期要轉換新方案如何辦理",
+                memory={"company_code": "tdtv", "known_info": {}},
+                history=[],
+                llm=RunnableLambda(incomplete_clarification),
+                persist=False,
+            )
+
+        self.assertEqual(
+            result["ai_response"],
+            "請問您想轉換成哪一類新方案？\n"
+            "1. 純網路\n"
+            "2. 純有線電視\n"
+            "3. 有線電視＋網路\n"
+            "4. 已有指定方案",
+        )
+
     def test_representative_semantic_turns_always_invoke_model(self):
         cases = (
             "請幫我轉真人客服",
@@ -76,16 +186,12 @@ class ModelRouterContractTest(unittest.TestCase):
 
         for text in cases:
             with self.subTest(text=text):
-                with patch(
-                    "app.services.intent_router.fallback_router",
-                    side_effect=AssertionError("retired fallback was invoked"),
-                ):
-                    decision = run_intent_router(
-                        user_input=text,
-                        memory={"company_code": "tdtv", "known_info": {}},
-                        history=[],
-                        llm=RunnableLambda(unavailable),
-                    )
+                decision = run_intent_router(
+                    user_input=text,
+                    memory={"company_code": "tdtv", "known_info": {}},
+                    history=[],
+                    llm=RunnableLambda(unavailable),
+                )
 
                 self.assertEqual(decision["route"], "unknown")
                 self.assertEqual(decision["reason"], "model_router_unavailable")
@@ -95,12 +201,8 @@ class ModelRouterContractTest(unittest.TestCase):
             raise AssertionError("semantic detector must not run after the model")
 
         detectors = (
-            "detect_safe_direct_reply",
-            "detect_company_info_query",
             "detect_company_info_interrupt_query",
             "is_clear_channel_group_query",
-            "detect_digital_tv_package_knowledge_guard",
-            "detect_convenience_store_payment_machine_guard",
             "is_personal_project_points_status_query",
             "is_paper_to_electronic_bill_change_query",
             "is_counter_service_account_transfer_hours_query",
@@ -127,7 +229,7 @@ class ModelRouterContractTest(unittest.TestCase):
 
         self.assertEqual(decision["intent"], "model_owned_intent")
 
-    def test_guard_without_model_ownership_only_normalizes_schema(self):
+    def test_post_model_guard_keeps_decision_without_keyword_reroute(self):
         decision = router_guard(
             user_input="客服電話多少",
             memory={"company_code": "tdtv", "known_info": {}},
@@ -139,7 +241,6 @@ class ModelRouterContractTest(unittest.TestCase):
                 "should_call_tool": False,
                 "should_retrieve_knowledge": False,
             },
-            llm_first=False,
         )
 
         self.assertEqual(decision["route"], "continue_current_flow")

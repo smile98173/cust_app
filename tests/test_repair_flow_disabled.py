@@ -52,16 +52,11 @@ def test_create_repair_ticket_flow_is_disabled_without_collecting_slots():
         latency={},
     )
 
-    assert reply == build_repair_ticket_flow_disabled_reply(updated)
+    assert "排除後仍無法恢復" in reply
+    assert "維修申告" in reply
+    assert "是否需要幫您轉接真人文字客服" in reply
     assert updated["pending_tool"] is None
     assert updated["pending_tool_args"] == []
-    assert updated["last_tool"] is None
-    assert updated["last_tool_result"]["data"]["disabled"] is True
-    assert updated["known_info"]["repair_flow_status"] == "disabled"
-    assert updated["known_info"]["repair_ready"] == "no"
-    assert "contact_name" not in updated["known_info"]
-    assert "contact_phone" not in updated["known_info"]
-    assert "service_address" not in updated["known_info"]
     assert updated["known_info"]["issue_description"] == "網路不能用"
 
 
@@ -113,8 +108,104 @@ def test_disabled_repair_keeps_short_failed_followup_in_repair_context():
 
     assert plan["should_call_tool"] is False
     assert plan["tool_name"] is None
-    assert "維持報修" in plan["reply"]
+    assert plan["intent"] == "human_handoff_offer"
+    assert "是否需要幫您轉接真人文字客服" in plan["reply"]
     assert "想查詢資料" not in plan["reply"]
+
+
+def test_active_troubleshooting_handoff_offer_includes_repair_form():
+    memory = {
+        "company_code": "tdtv",
+        "known_info": {
+            "troubleshooting_started": "yes",
+            "troubleshooting_type": "network",
+            "troubleshooting_step": "net_reboot_modem",
+            "issue_description": "網路完全斷線",
+        },
+    }
+    router_result = {
+        "route": "clarify",
+        "intent": "human_handoff_offer",
+        "tool_name": None,
+        "topic": "網路故障",
+        "should_cancel_current_flow": False,
+        "should_call_tool": False,
+        "should_retrieve_knowledge": False,
+        "reply": "重新啟動後仍無法恢復，請問是否需要幫您轉接真人文字客服？",
+        "reason": "model_confirmed_troubleshooting_failure",
+    }
+
+    with patch(
+        "app.handlers.chat_handler.run_intent_router",
+        return_value=router_result,
+    ):
+        result = handle_chat_message(
+            "test:repair-offer",
+            "數據機已重新啟動，還是完全不能上網",
+            memory,
+            [],
+            llm=None,
+            persist=False,
+        )
+
+    assert "維修申告" in result["ai_response"]
+    assert "是否需要幫您轉接真人文字客服" in result["ai_response"]
+    assert "smartCustomerService/real/" not in result["ai_response"]
+    assert result["memory"]["known_info"]["troubleshooting_failed"] == "yes"
+    assert result["memory"]["known_info"]["repair_ready"] == "yes"
+    assert result["memory"]["clarify_context"]["type"] == "human_handoff_offer"
+
+
+def test_repeated_same_issue_after_repair_offer_returns_only_escalation_choices():
+    memory = {
+        "company_code": "tdtv",
+        "clarify_context": {"type": "human_handoff_offer"},
+        "known_info": {
+            "troubleshooting_started": "no",
+            "troubleshooting_type": "set_top_box_network",
+            "troubleshooting_failed": "yes",
+            "repair_ready": "yes",
+            "issue_description": "哈TV機上盒的網路連線有問題",
+        },
+    }
+    history = [
+        {"role": "user", "content": "還是不行"},
+        {
+            "role": "assistant",
+            "content": "請填寫維修申告，或選擇轉真人文字客服。",
+        },
+    ]
+
+    with patch(
+        "app.handlers.chat_handler.run_intent_router",
+        return_value={
+            "route": "troubleshooting",
+            "intent": "tv_set_top_box_network_connection_issue",
+            "service_scope": "哈TV機上盒聯網",
+            "should_cancel_current_flow": False,
+            "should_call_tool": False,
+            "should_retrieve_knowledge": False,
+            "reply": "",
+            "reason": "same_set_top_box_fault",
+        },
+    ):
+        result = handle_chat_message(
+            "test:repeat-repair-escalation",
+            "網路正常，是哈TV機上盒的網路連線有問題",
+            memory,
+            history,
+            llm=None,
+            persist=False,
+        )
+
+    reply = result["ai_response"]
+    assert result["plan"]["intent"] == "human_handoff_offer"
+    assert "您的問題需進一步協助處理" in reply
+    assert "請填寫申告維修單" in reply
+    assert "維修申告" in reply
+    assert "或選擇轉真人服務" in reply
+    assert "不會再要求" not in reply
+    assert "請先" not in reply
 
 
 def test_disabled_repair_keeps_symptom_followups_in_repair_context():
@@ -162,7 +253,8 @@ def test_disabled_repair_keeps_symptom_followups_in_repair_context():
     router_mock.assert_called_once()
     assert first["plan"]["should_call_tool"] is False
     assert first["plan"]["tool_name"] is None
-    assert "維持報修" in first["ai_response"]
+    assert first["plan"]["intent"] == "human_handoff_offer"
+    assert "是否需要幫您轉接真人文字客服" in first["ai_response"]
     assert "想查詢資料" not in first["ai_response"]
 
     memory = first["memory"]

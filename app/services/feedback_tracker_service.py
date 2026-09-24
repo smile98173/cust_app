@@ -61,7 +61,7 @@ SYNC_CURSOR_KEYS = {
 
 
 def now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return datetime.now().isoformat(timespec="microseconds")
 
 
 def tracker_db_conn() -> sqlite3.Connection:
@@ -113,6 +113,8 @@ def init_tracker_schema() -> None:
                 acceptance_issue TEXT,
                 acceptance_feedback TEXT,
                 adjusted_conversation_json TEXT,
+                edited_suggestion TEXT,
+                deleted_at TEXT,
                 updated_at TEXT NOT NULL,
                 updated_by TEXT
             );
@@ -188,6 +190,10 @@ def init_tracker_schema() -> None:
             conn.execute("ALTER TABLE feedback_tracker_state ADD COLUMN acceptance_issue TEXT")
         if "acceptance_feedback" not in tracker_columns:
             conn.execute("ALTER TABLE feedback_tracker_state ADD COLUMN acceptance_feedback TEXT")
+        if "edited_suggestion" not in tracker_columns:
+            conn.execute("ALTER TABLE feedback_tracker_state ADD COLUMN edited_suggestion TEXT")
+        if "deleted_at" not in tracker_columns:
+            conn.execute("ALTER TABLE feedback_tracker_state ADD COLUMN deleted_at TEXT")
         # Early batches used pass/fail for AI evaluation. Those values belong to
         # processing progress, while review_status remains reserved for CSR review.
         migration_time = now_iso()
@@ -706,8 +712,8 @@ def apply_tracking_update_bundle(payload: dict[str, Any]) -> int:
                 INSERT INTO feedback_tracker_state (
                     feedback_id, status, priority, owner, review_status, review_note,
                     acceptance_issue, acceptance_feedback, adjusted_conversation_json,
-                    updated_at, updated_by
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    edited_suggestion, deleted_at, updated_at, updated_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(feedback_id) DO UPDATE SET
                     status=excluded.status, priority=excluded.priority, owner=excluded.owner,
                     review_status=excluded.review_status, review_note=excluded.review_note,
@@ -723,6 +729,11 @@ def apply_tracking_update_bundle(payload: dict[str, Any]) -> int:
                         excluded.adjusted_conversation_json,
                         feedback_tracker_state.adjusted_conversation_json
                     ),
+                    edited_suggestion=COALESCE(
+                        excluded.edited_suggestion,
+                        feedback_tracker_state.edited_suggestion
+                    ),
+                    deleted_at=COALESCE(excluded.deleted_at, feedback_tracker_state.deleted_at),
                     updated_at=excluded.updated_at, updated_by=excluded.updated_by
                 WHERE excluded.updated_at > feedback_tracker_state.updated_at
                 """,
@@ -732,6 +743,7 @@ def apply_tracking_update_bundle(payload: dict[str, Any]) -> int:
                     normalize_review_status(row.get("review_status")), row.get("review_note"),
                     row.get("acceptance_issue"), row.get("acceptance_feedback"),
                     row.get("adjusted_conversation_json"),
+                    row.get("edited_suggestion"), row.get("deleted_at"),
                     row.get("updated_at"), row.get("updated_by"),
                 ),
             )
@@ -855,7 +867,7 @@ def build_tracking_update_bundle() -> dict[str, Any]:
             dict(row) for row in conn.execute(
                 "SELECT feedback_id, status, priority, owner, review_status, review_note, "
                 "acceptance_issue, acceptance_feedback, "
-                "adjusted_conversation_json, updated_at, updated_by "
+                "adjusted_conversation_json, edited_suggestion, deleted_at, updated_at, updated_by "
                 "FROM feedback_tracker_state"
             ).fetchall()
         ]
@@ -995,7 +1007,7 @@ def list_feedback_items(
     include_merged: bool = True,
 ) -> list[dict[str, Any]]:
     init_tracker_schema()
-    clauses = ["substr(f.created_at, 1, 10) >= ?"]
+    clauses = ["substr(f.created_at, 1, 10) >= ?", "t.deleted_at IS NULL"]
     params: list[Any] = [start_date]
     if end_date:
         clauses.append("substr(f.created_at, 1, 10) <= ?")
@@ -1023,7 +1035,7 @@ def list_feedback_items(
             SELECT f.*, COALESCE(t.status, ?) AS status, t.priority, t.owner,
                    COALESCE(t.review_status, ?) AS review_status, t.review_note,
                    t.acceptance_issue, t.acceptance_feedback,
-                   t.adjusted_conversation_json,
+                   t.adjusted_conversation_json, t.edited_suggestion,
                    t.updated_at, t.updated_by
             FROM feedback_records f
             LEFT JOIN feedback_tracker_state t ON t.feedback_id = f.feedback_id
@@ -1039,6 +1051,8 @@ def list_feedback_items(
     return [
         {
             **dict(row),
+            "original_suggestion": row["suggestion"],
+            "suggestion": row["edited_suggestion"] or row["suggestion"],
             "conversation": decode_json(row["conversation_json"], []),
             "adjusted_conversation": decode_json(row["adjusted_conversation_json"], []),
         }
@@ -1105,6 +1119,79 @@ def list_regression_cases(
         }
         for row in rows
     ]
+
+
+def require_pending_feedback(conn: sqlite3.Connection, feedback_id: str) -> None:
+    row = conn.execute(
+        """
+        SELECT COALESCE(t.status, 'pending') AS status,
+               COALESCE(t.review_status, 'pending') AS review_status,
+               t.deleted_at
+        FROM feedback_records f
+        LEFT JOIN feedback_tracker_state t ON t.feedback_id = f.feedback_id
+        WHERE f.feedback_id = ?
+        """,
+        (feedback_id,),
+    ).fetchone()
+    if row is None or row["deleted_at"] is not None:
+        raise LookupError("找不到這筆回饋。")
+    if (normalize_feedback_status(row["status"]) != "pending"
+            or normalize_review_status(row["review_status"]) != "pending"):
+        raise ValueError("只有待修正的回饋可以編輯或刪除。")
+
+
+def edit_pending_feedback_suggestion(
+    feedback_id: str, suggestion: str, actor: str
+) -> dict[str, Any]:
+    value = str(suggestion or "").strip()
+    if not value:
+        raise ValueError("客服回饋不可空白。")
+    init_tracker_schema()
+    conn = tracker_db_conn()
+    try:
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            require_pending_feedback(conn, feedback_id)
+            conn.execute(
+                """
+                INSERT INTO feedback_tracker_state (
+                    feedback_id, status, review_status, edited_suggestion, updated_at, updated_by
+                ) VALUES (?, 'pending', 'pending', ?, ?, ?)
+                ON CONFLICT(feedback_id) DO UPDATE SET
+                    edited_suggestion=excluded.edited_suggestion,
+                    updated_at=excluded.updated_at,
+                    updated_by=excluded.updated_by
+                """,
+                (feedback_id, value, now_iso(), actor),
+            )
+    finally:
+        conn.close()
+    return {"status": "success", "feedback_id": feedback_id}
+
+
+def delete_pending_feedback(feedback_id: str, actor: str) -> dict[str, Any]:
+    init_tracker_schema()
+    conn = tracker_db_conn()
+    try:
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            require_pending_feedback(conn, feedback_id)
+            timestamp = now_iso()
+            conn.execute(
+                """
+                INSERT INTO feedback_tracker_state (
+                    feedback_id, status, review_status, deleted_at, updated_at, updated_by
+                ) VALUES (?, 'pending', 'pending', ?, ?, ?)
+                ON CONFLICT(feedback_id) DO UPDATE SET
+                    deleted_at=excluded.deleted_at,
+                    updated_at=excluded.updated_at,
+                    updated_by=excluded.updated_by
+                """,
+                (feedback_id, timestamp, timestamp, actor),
+            )
+    finally:
+        conn.close()
+    return {"status": "success", "feedback_id": feedback_id}
 
 
 def update_feedback_item(feedback_id: str, changes: dict[str, Any], actor: str) -> dict[str, Any]:
