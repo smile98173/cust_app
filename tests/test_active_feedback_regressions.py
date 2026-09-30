@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest.mock import patch
 
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
@@ -11,17 +12,25 @@ from app.handlers.chat_handler import (
     build_promotion_catalog_reply,
     build_knowledge_summary,
     build_payment_cycle_evidence_fallback,
+    compose_knowledge_reply,
     carry_forward_same_intent_evidence,
+    carry_forward_knowledge_intent,
     build_unpaid_partial_payment_router,
     build_plan_from_router,
+    build_clarify_context,
     disable_repair_ticket_flow,
     detect_active_flow_switch,
     ensure_known_link_mentions,
+    focus_knowledge_process_docs,
+    policy_evidence_for_intent,
     format_customer_reply_text,
     is_likely_slot_answer,
     is_unpaid_partial_payment_question,
-    is_unpaid_reactivation_request,
+    requires_receipt_image_evidence,
+    resolve_model_selected_context,
+    run_tool_or_rag_flow,
 )
+from app.services.intent_router import router_guard
 from app.services.troubleshooting_engine import apply_troubleshooting_engine
 from app.services.troubleshooting_engine import record_declared_speed_gap
 from app.services.slot_manager import (
@@ -35,6 +44,232 @@ from app.services.company_profile import build_company_info_reply
 
 
 class ActiveFeedbackRegressionTest(unittest.TestCase):
+    def test_generic_knowledge_continuation_keeps_last_llm_intent(self):
+        memory = {
+            "last_knowledge_intent": "existing_tv_add_broadband_fee_query",
+            "last_knowledge_query": "現有有線電視用戶 加辦寬頻 月費",
+        }
+        continuation = carry_forward_knowledge_intent(
+            {"route": "continue_current_flow", "intent": "other", "should_cancel_current_flow": False},
+            memory,
+        )
+        self.assertEqual(continuation["intent"], "existing_tv_add_broadband_fee_query")
+        self.assertTrue(continuation["should_retrieve_knowledge"])
+        self.assertIn("加辦寬頻", continuation["knowledge_query"])
+
+        new_topic = carry_forward_knowledge_intent(
+            {"route": "knowledge_query", "intent": "other", "should_cancel_current_flow": True},
+            memory,
+        )
+        self.assertEqual(new_topic["intent"], "other")
+
+    def test_relocation_summary_is_not_replaced_by_payment_cycle_fallback(self):
+        docs = [{
+            "question": "移機費與收視費",
+            "answer": (
+                "移機費與分機費\n"
+                "有線電視室外移機費$800\n有線電視室內移機費$500\n"
+                "寬頻網路室外移機費$500\n寬頻網路室內移機費$500\n"
+                "月繳$100\n季繳$1650\n半年繳$3280\n年繳$1200"
+            ),
+        }]
+        summary = (
+            "移機前先確認新址是否可施工；有線電視室外移機費 800 元、"
+            "室內 500 元，寬頻網路室外和室內移機費各 500 元。"
+        )
+
+        reply = compose_knowledge_reply(
+            "我想搬家",
+            "",
+            docs,
+            llm=RunnableLambda(lambda _: AIMessage(content=summary)),
+            intent="relocation_guidance",
+        )
+
+        self.assertIn("移機", reply)
+        self.assertIn("新址", reply)
+        self.assertNotIn("有線電視收視費如下", reply)
+
+    def test_member_registration_does_not_use_login_reply(self):
+        decision = router_guard(
+            "會員怎麼註冊？",
+            {"known_info": {}},
+            {"route": "direct_reply", "intent": "member_registration_guidance", "reply": ""},
+        )
+        self.assertEqual(decision["intent"], "member_registration_guidance")
+        self.assertIn("用戶編號", decision["reply"])
+        self.assertIn("帳單", decision["reply"])
+        self.assertIn("雲端帳號", decision["reply"])
+        self.assertNotIn("忘記密碼", decision["reply"])
+
+    def test_no_program_clarification_selection_starts_display_troubleshooting(self):
+        router = router_guard(
+            "電視沒節目",
+            {"known_info": {}},
+            {"route": "clarify", "intent": "tv_no_program_clarify", "reply": "請先重搜頻道"},
+        )
+        self.assertEqual(router["route"], "clarify")
+        context = build_clarify_context(router, original_query="電視沒節目")
+        self.assertEqual(context["type"], "tv_no_program_symptom")
+        self.assertIn("畫面顯示沒有節目", build_plan_from_router(router)["reply"])
+
+        memory = {"known_info": {}, "clarify_context": context}
+        selected, matched = resolve_model_selected_context(
+            memory,
+            {"route": "clarify", "intent": "other", "selected_option_id": "tv_no_program_display_message"},
+        )
+        self.assertTrue(matched)
+        self.assertEqual(selected["intent"], "tv_no_program_display_issue")
+        plan = apply_troubleshooting_engine("3", memory, build_plan_from_router(selected))
+        self.assertEqual(memory["known_info"]["troubleshooting_step"], "tv_rescan_channels")
+        self.assertIn("重搜", plan["reply"])
+
+    def test_bill_lookup_not_found_does_not_add_operation_failed_prefix(self):
+        tool_result = {
+            "success": False,
+            "tool_name": "search_bill",
+            "message": "查詢不到您的資料，請確認戶名與電話是否與帳務資料一致。",
+            "data": {"missing": ["name", "phone"]},
+        }
+        with (
+            patch("app.handlers.chat_handler.get_missing_tool_args", return_value=[]),
+            patch("app.handlers.chat_handler.call_tool", return_value=tool_result),
+        ):
+            reply, _ = run_tool_or_rag_flow(
+                user_text="測試查詢帳單",
+                memory={"known_info": {}},
+                plan={"reply": "", "should_call_tool": True, "tool_name": "search_bill"},
+                router={"route": "tool_action", "tool_name": "search_bill"},
+                latency={},
+            )
+
+        self.assertTrue(reply.startswith(tool_result["message"]))
+        self.assertNotIn("本次操作未完成", reply)
+        self.assertIn("真人客服協助核對", reply)
+
+    def test_passed_policy_answers_stay_in_direct_reply_contract(self):
+        cases = (
+            ("網路是獨立的還是區域共用？", "network_line_ownership_guidance", "每戶獨立申裝"),
+            ("請問兩個用戶編號的哈 Point 可以合併嗎？", "points_account_merge_policy", "無法合併或轉移"),
+            ("我要退網路", "broadband_termination_guidance", "數據機"),
+            ("解除綁定固定 IP", "fixed_ip_unbinding_steps", "取消綁定"),
+            ("綁定固定 IP", "fixed_ip_existing_binding_steps", "會員登入"),
+            ("發票存到哪裡？", "invoice_storage_lookup", "歷史帳單"),
+        )
+        for message, intent, expected in cases:
+            with self.subTest(intent=intent):
+                decision = router_guard(
+                    message,
+                    {"known_info": {}},
+                    {"route": "direct_reply", "intent": intent, "reply": ""},
+                )
+                self.assertEqual(decision["route"], "direct_reply")
+                self.assertIn(expected, decision["reply"])
+                self.assertNotIn("轉真人", decision["reply"])
+
+    def test_short_current_network_followup_asks_for_scope(self):
+        decision = router_guard(
+            "目前網路",
+            {"known_info": {}},
+            {"route": "direct_reply", "intent": "network_line_ownership_guidance", "reply": ""},
+        )
+        self.assertEqual(decision["route"], "clarify")
+        self.assertIn("獨立或共用", decision["reply"])
+        self.assertIn("網路方案", decision["reply"])
+
+    def test_quarterly_hbo_benefit_is_company_scoped(self):
+        proposal = {"route": "direct_reply", "intent": "cable_tv_quarterly_hbo_benefit", "reply": ""}
+        cnt = router_guard("第四台季繳有送 HBO 嗎？", {"company_code": "cnt", "known_info": {}}, proposal)
+        other = router_guard("第四台季繳有送 HBO 嗎？", {"company_code": "tdtv", "known_info": {}}, proposal)
+
+        self.assertIn("HBO CH221", cnt["reply"])
+        self.assertIn("或選擇現金折扣 45 元", cnt["reply"])
+        self.assertEqual(other["route"], "knowledge_query")
+        self.assertNotIn("1,695", other.get("reply") or "")
+
+    def test_fixed_ip_new_application_keeps_full_evidence_path(self):
+        decision = router_guard(
+            "我要申請固定IP",
+            {"company_code": "wctv", "known_info": {}},
+            {"route": "direct_reply", "intent": "fixed_ip_binding_guidance", "reply": "簡短設定"},
+        )
+        self.assertEqual(decision["route"], "knowledge_query")
+        self.assertIn("台基科官網", decision["knowledge_query"])
+
+        existing = router_guard(
+            "已經申請好固定 IP 數量，現在我要綁定",
+            {"company_code": "wctv", "known_info": {}},
+            {"route": "direct_reply", "intent": "fixed_ip_existing_binding_steps", "reply": ""},
+        )
+        self.assertEqual(existing["route"], "direct_reply")
+        self.assertIn("會員登入", existing["reply"])
+        self.assertNotIn("先由真人客服", existing["reply"])
+
+    def test_remote_price_policy_is_answer_evidence(self):
+        docs = policy_evidence_for_intent(
+            {"company_code": "cnt"}, "remote_control_price_inquiry"
+        )
+        self.assertEqual(len(docs), 1)
+        self.assertIn("一般型遙控器 300 元", docs[0]["answer"])
+        self.assertIn("語音遙控器 400 元", docs[0]["answer"])
+
+    def test_posted_payment_model_alias_uses_existing_guidance(self):
+        decision = router_guard(
+            "沒有收據，系統已顯示入帳但尚未恢復",
+            {"known_info": {}},
+            {"route": "direct_reply", "intent": "payment_posted_no_receipt_guidance", "reply": "請轉真人"},
+        )
+        self.assertEqual(decision["route"], "direct_reply")
+        self.assertIn("官網或哈TV行動客服 APP", decision["reply"])
+        self.assertNotIn("真人", decision["reply"])
+
+    def test_safe_mode_requires_device_before_giving_tv_steps(self):
+        memory = {"known_info": {}}
+        routed = router_guard(
+            "安全模式",
+            memory,
+            {"route": "direct_reply", "intent": "tv_safe_mode_guidance", "reply": ""},
+        )
+        self.assertEqual(routed["route"], "clarify")
+        self.assertEqual(routed["intent"], "tv_safe_mode_device_clarify")
+        memory["clarify_context"] = build_clarify_context(routed, "安全模式")
+        answered, selected = resolve_model_selected_context(
+            memory,
+            {"route": "direct_reply", "intent": "tv_safe_mode_guidance"},
+        )
+        self.assertTrue(selected)
+        self.assertEqual(answered["intent"], "tv_safe_mode_guidance")
+        self.assertIn("電視電源拔除約 1 分鐘", answered["reply"])
+
+    def test_accepted_process_queries_exclude_unrelated_evidence(self):
+        docs = [
+            {"question": "綁定信用卡", "answer": "會員專區設定續期信用卡"},
+            {"question": "更改綁定信用卡", "answer": "申請異動"},
+            {"question": "循環扣款", "answer": "信用卡或銀行帳戶每期扣款"},
+            {"question": "複製遙控器的功能如何操作", "answer": "學習電源鍵"},
+            {"question": "遙控器無法操作", "answer": "檢查電池"},
+            {"question": "中獎發票一定要到櫃檯領取嗎?", "answer": "簡訊通知"},
+            {"question": "電子發票何時開立", "answer": "入帳隔天"},
+            {"question": "免費觀看YouTube", "answer": "聯網機上盒"},
+            {"question": "加值服務費用", "answer": "其他項目"},
+        ]
+        self.assertEqual(
+            [doc["question"] for doc in focus_knowledge_process_docs(docs, "auto_payment_guidance")],
+            ["綁定信用卡", "循環扣款"],
+        )
+        self.assertEqual(
+            [doc["question"] for doc in focus_knowledge_process_docs(docs, "remote_power_learning")],
+            ["複製遙控器的功能如何操作"],
+        )
+        self.assertEqual(
+            [doc["question"] for doc in focus_knowledge_process_docs(docs, "invoice_win_notification")],
+            ["中獎發票一定要到櫃檯領取嗎?"],
+        )
+        self.assertEqual(
+            [doc["question"] for doc in focus_knowledge_process_docs(docs, "youtube_on_tv_guidance")],
+            ["免費觀看YouTube"],
+        )
+
     def test_declared_speed_gap_survives_a_followup_with_only_measured_speed(self):
         known = {}
 
@@ -75,6 +310,8 @@ class ActiveFeedbackRegressionTest(unittest.TestCase):
         self.assertFalse(first["should_call_tool"])
         self.assertIn("300 Mbps", first["reply"])
         self.assertIn("30 Mbps", first["reply"])
+        self.assertIn("網路線直接連接數據機", first["reply"])
+        self.assertNotIn("數據機或分享器", first["reply"])
         self.assertFalse(second["should_call_tool"])
         self.assertIsNone(second["tool_name"])
         self.assertEqual(second["intent"], "human_handoff_offer")
@@ -361,13 +598,27 @@ class ActiveFeedbackRegressionTest(unittest.TestCase):
         self.assertIn("不會直接執行復線", router["reply"])
         self.assertIn("官網或哈TV行動客服 APP", router["reply"])
 
-    def test_future_payment_cannot_start_reactivation(self):
-        self.assertTrue(
-            is_unpaid_reactivation_request("可以先幫我恢復嗎？我晚點去繳")
-        )
-        self.assertFalse(
-            is_unpaid_reactivation_request("我已經繳費了，可以幫我恢復嗎？")
-        )
+    def test_paid_reactivation_requires_receipt_but_unpaid_does_not(self):
+        for text, tool_name in (
+            ("我已繳費，想辦網路復線", "bill_return_line_internet"),
+            ("我已在超商繳費，想辦電視復線", "bill_return_line_tv"),
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(requires_receipt_image_evidence(
+                    text,
+                    {"route": "tool_action", "tool_name": tool_name},
+                    {"known_info": {}},
+                ))
+        self.assertFalse(requires_receipt_image_evidence(
+            "我還沒繳費，想先辦電視復線",
+            {"route": "tool_action", "tool_name": "bill_return_line_tv"},
+            {"known_info": {}},
+        ))
+        self.assertTrue(requires_receipt_image_evidence(
+            "核對超商收據",
+            {"route": "tool_action", "tool_name": "payment_bill_batch"},
+            {"known_info": {}},
+        ))
 
     def test_app_invoice_followup_uses_history_bill_only(self):
         reply = build_app_payment_receipt_lookup_reply(
@@ -619,7 +870,129 @@ class ActiveFeedbackRegressionTest(unittest.TestCase):
 
         self.assertFalse(result["should_call_tool"])
         self.assertEqual(memory["known_info"]["troubleshooting_step"], "net_reboot_modem")
-        self.assertIn("無法確認是否已完成數據機重開", result["reply"])
+        self.assertIn("您已按剛才的步驟重開數據機了嗎", result["reply"])
+
+        repeated = apply_troubleshooting_engine(
+            "沒有網際網路連線",
+            memory,
+            {"reply": "", "should_call_tool": False, "tool_name": None},
+            llm=llm,
+        )
+        self.assertEqual(repeated["intent"], "human_handoff_offer")
+
+    def test_reboot_confirmation_is_not_service_recovery(self):
+        memory = {
+            "known_info": {
+                "troubleshooting_started": "yes",
+                "troubleshooting_type": "network",
+                "troubleshooting_step": "net_reboot_modem",
+                "retry": 1,
+            }
+        }
+        previous_question = (
+            "我再確認一下：您已按剛才的步驟重開數據機了嗎？"
+            "若已重開仍無法上網，請直接告訴我，我會協助後續處理。"
+        )
+        prompts = []
+
+        def classify(prompt):
+            prompts.append(str(prompt))
+            return AIMessage(content='{"label":"affirmative","reply":""}')
+
+        result = apply_troubleshooting_engine(
+            "對",
+            memory,
+            {"reply": "", "should_call_tool": False, "tool_name": None},
+            llm=RunnableLambda(classify),
+            history=[{"role": "assistant", "content": previous_question}],
+        )
+
+        self.assertIn(previous_question, prompts[0])
+        self.assertIn("網路是否已恢復", result["reply"])
+        self.assertNotEqual(memory["known_info"]["troubleshooting_step"], "resolved")
+
+    def test_confirmed_recovery_uses_model_reply_not_fixed_template(self):
+        memory = {
+            "known_info": {
+                "troubleshooting_started": "yes",
+                "troubleshooting_type": "network",
+                "troubleshooting_step": "net_reboot_modem",
+                "retry": 0,
+            }
+        }
+        model_reply = "了解，您確認網路已恢復；後續若再遇到連線問題，歡迎告訴我。"
+        llm = RunnableLambda(
+            lambda _prompt: AIMessage(
+                content=json.dumps({"label": "recovered", "reply": model_reply}, ensure_ascii=False)
+            )
+        )
+
+        result = apply_troubleshooting_engine(
+            "現在可以上網了",
+            memory,
+            {"reply": "", "should_call_tool": False, "tool_name": None},
+            llm=llm,
+            history=[{"role": "assistant", "content": "重開數據機後，網路是否已恢復？"}],
+        )
+
+        self.assertEqual(result["reply"], model_reply)
+        self.assertEqual(memory["known_info"]["troubleshooting_step"], "resolved")
+
+    def test_reboot_confirmation_then_recovery_does_not_hit_retry_limit(self):
+        memory = {
+            "known_info": {
+                "troubleshooting_started": "yes",
+                "troubleshooting_type": "network",
+                "troubleshooting_step": "net_reboot_modem",
+                "retry": 1,
+            }
+        }
+        answers = iter([
+            '{"label":"affirmative","reply":""}',
+            '{"label":"recovered","reply":"了解，網路已恢復。"}',
+        ])
+        llm = RunnableLambda(lambda _prompt: AIMessage(content=next(answers)))
+        first = apply_troubleshooting_engine(
+            "對",
+            memory,
+            {"reply": "", "should_call_tool": False, "tool_name": None},
+            llm=llm,
+            history=[{"role": "assistant", "content": "您已重開數據機了嗎？"}],
+        )
+        second = apply_troubleshooting_engine(
+            "對",
+            memory,
+            {"reply": "", "should_call_tool": False, "tool_name": None},
+            llm=llm,
+            history=[{"role": "assistant", "content": first["reply"]}],
+        )
+
+        self.assertIn("網路是否已恢復", first["reply"])
+        self.assertEqual(second["reply"], "了解，網路已恢復。")
+        self.assertEqual(memory["known_info"]["troubleshooting_step"], "resolved")
+
+    def test_failed_modem_step_outcome_does_not_repeat_reboot(self):
+        llm = RunnableLambda(lambda _prompt: AIMessage(content='{"label":"failed"}'))
+        for user_reply in ("沒用", "還是不行"):
+            with self.subTest(user_reply=user_reply):
+                memory = {
+                    "known_info": {
+                        "troubleshooting_started": "yes",
+                        "troubleshooting_type": "network",
+                        "troubleshooting_step": "net_reboot_modem",
+                        "retry": 0,
+                    }
+                }
+                result = apply_troubleshooting_engine(
+                    user_reply,
+                    memory,
+                    {"reply": "", "should_call_tool": False, "tool_name": None},
+                    llm=llm,
+                )
+
+                self.assertEqual(result["intent"], "human_handoff_offer")
+                self.assertEqual(memory["known_info"]["repair_ready"], "yes")
+                self.assertNotIn("請先將數據機", result["reply"])
 
     def test_explicit_post_reboot_failure_can_move_to_repair(self):
         memory = {
@@ -710,6 +1083,8 @@ class ActiveFeedbackRegressionTest(unittest.TestCase):
         )
 
         self.assertIn("逐項列出所有室內／室外及各服務費用", captured["prompt"])
+        self.assertIn("先確認新址線路", captured["prompt"])
+        self.assertIn("施工費原則上完工後收取", captured["prompt"])
         self.assertIn("客服電話或服務地區", captured["prompt"])
 
     def test_same_llm_intent_keeps_previous_relocation_evidence(self):

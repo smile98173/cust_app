@@ -8,6 +8,7 @@
 
 ## 文件導覽
 
+- [`AGENTS.md`](AGENTS.md)：修改 AI 客服回覆與處理客服回饋時的 repository 級維護規則，包含 Prompt 成長控制、修正分層與回歸測試要求。
 - [`docs/main_program_architecture_quickstart.md`](docs/main_program_architecture_quickstart.md)：給新維護者的 15 分鐘主程式架構導覽與常見修改地圖。
 - `docs/README.md`：文件索引，區分現行操作文件與歷史紀錄。
 - `docs/active_customer_service_handoff_2026-09-14.md`：目前客服 AI 的架構、規則邊界與測試交接紀錄。

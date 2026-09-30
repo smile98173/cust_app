@@ -88,6 +88,10 @@ cust_app_runtime/           正式 runtime logs、feedback、company_profiles.js
 
 建議部署原則是「程式歸程式，資料歸資料」：更新 `app/`、`scripts/`、`requirements.txt`、文件與設定範本時，保留正式 `.env.production` 與 `cust_app_runtime`。目前公司資訊與本地 RAG 資料預設都放在 `cust_app_runtime`。
 
+本機可雙擊 `scripts/build_deploy_package.bat` 產生精簡的完整程式 ZIP。它每次從目前工作檔重新打包 `app/**/*.py`、`.streamlit/config.toml` 與 `requirements.txt`（包含尚未 commit 的修改），輸出到專案同層的 `cust_app_releases/`，不寫入 `cust_app/`，也不自動上傳。ZIP 根目錄的 `PACKAGE_MANIFEST.txt` 列出檔案與 SHA256。`scripts/`、文件及測試不在執行程式包內；如正式維護流程另需腳本，須單獨審查後部署。
+
+此 ZIP 不是線上資料備份，也不是「只包含 Git 差異」的增量包。上傳前先備份正式程式、核對 manifest 與相依套件；更新時保留正式環境變數／`.env.production`、`cust_app_runtime/`、資料庫與知識索引，勿用 ZIP 覆蓋它們。若新版本移除了舊程式檔，也須在備份後檢查線上 `app/` 是否殘留舊檔。完成後按下方健康檢查與對話情境驗證，異常時依回退步驟還原。
+
 ### OpenAI
 
 ```env
@@ -283,7 +287,7 @@ CUST_API_CHANNEL_QUERY_URL=
 
 超商繳費收據復線會使用 `CUST_API_PAYMENT_BARCODE_URL`，收到第一段、第二段、第三段條碼後確認繳費並進行復線處理。適用 7-11、全家、萊爾富、OK 等超商收據。
 
-所有需要客戶身分的 CUST_API 都會優先使用明確傳入的 `custnum` 查詢；沒有 `custnum` 時，才會向用戶補問戶名與聯絡電話。`user_id` / `member_id` 只代表 Web 使用者識別，不會自動當成 CUST_API 客戶編號。
+Web `is_logged_in=true` 時，有效數字 `user_id` 是系統帶入的 CUST_API 客編；`false` 時只是訪客流水號。若另傳 `custnum`，明確欄位優先。聊天中自行輸入的其他客編不得繼承系統驗證狀態；工具仍依各自身分核對契約執行。
 
 目前報修、取消報修、申請裝機、查地址可申辦、加值方案查詢仍停用。報修/取消報修停用訊息會引導真人客服並附上維修申告連結；排錯流程中若使用者回覆 `不知道`、`不清楚`、`沒用`、`不行` 或拒絕排錯，也會直接走這段停用訊息。優惠、促銷與推薦方案仍需先由 LLM 判斷意圖，再依知識庫或結構化方案資料回答。
 
@@ -356,7 +360,7 @@ python -m pytest tests -q
 - Web UI「知識庫維護」可上傳文件並成功建立 Chroma 索引；以不同服務主題測試，確認 RAG 不會用不相干文件回答。
 - LINE 每個 Bot webhook verify 成功。
 - LINE 傳「真人客服」會進真人模式並通知群組。
-- Web `/api/v1/chat` 第一輪和第二輪帶 `user_id`、`company_code`、`msg`、`is_logged_in`；若有 CUST_API 客戶編號另帶 `custnum` 或 `metadata.custnum`；並能收到 response `msg`。
+- Web `/api/v1/chat` 每輪帶 `user_id`、`company_code`、`msg`、`is_logged_in`；登入會員的 `user_id` 必須是客編，訪客的 `user_id` 是流水號；舊版另帶 `custnum` 或 `metadata.custnum` 仍可相容，並能收到 response `msg`。
 - 客戶 API 在 `CUST_API_USE_MOCK=false` 前已確認 endpoint、payload、timeout、錯誤格式。
 
 ## 6. 回退方式

@@ -25,6 +25,17 @@ from app.services.slot_manager import (
 
 
 class CustomerValidationTest(unittest.TestCase):
+    def test_identity_pair_pending_accepts_plain_name_for_bill_lookup(self):
+        memory = {
+            "known_info": {},
+            "pending_tool": "search_bill",
+            "pending_tool_args": ["identity_pair"],
+        }
+        self.assertEqual(
+            rule_extract_slots_from_text("王大明", memory, "search_bill")["name"],
+            "王大明",
+        )
+
     def test_explicit_customer_number_requires_a_customer_number_label(self):
         self.assertEqual(extract_explicit_customer_number("客編 1082281"), "1082281")
         self.assertEqual(
@@ -392,6 +403,37 @@ class CustomerValidationTest(unittest.TestCase):
             "bill_return_line_tv",
         ]:
             self.assertEqual(get_missing_tool_args(tool_name, memory), [], tool_name)
+
+    def test_chat_entered_customer_number_does_not_inherit_web_authentication(self):
+        memory = {
+            "is_logged_in": True,
+            "known_info": {
+                "custnum": "905397",
+                "custnum_source": "web_authenticated",
+                "is_logged_in": True,
+            },
+        }
+
+        merge_slots_into_memory(memory, {"custnum": "1082281"})
+
+        self.assertEqual(memory["known_info"]["custnum"], "1082281")
+        self.assertEqual(memory["known_info"]["custnum_source"], "user_provided")
+        self.assertEqual(get_missing_tool_args("search_bill", memory), ["identity_pair"])
+
+    def test_repeating_authenticated_customer_number_keeps_its_source(self):
+        memory = {
+            "is_logged_in": True,
+            "known_info": {
+                "custnum": "905397",
+                "custnum_source": "web_authenticated",
+                "is_logged_in": True,
+            },
+        }
+
+        merge_slots_into_memory(memory, {"custnum": "905397"})
+
+        self.assertEqual(memory["known_info"]["custnum_source"], "web_authenticated")
+        self.assertEqual(get_missing_tool_args("search_bill", memory), [])
 
     def test_reconnection_tools_do_not_require_service_address(self):
         memory = {"known_info": {}}

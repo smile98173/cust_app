@@ -92,13 +92,10 @@ X-API-Token: <access_token>
 ```json
 {
   "request_id": "web_20260529_0001",
-  "user_id": "member_123456",
+  "user_id": "905397",
   "is_logged_in": true,
   "company_code": "tdtv",
-  "msg": "我想查詢帳單",
-  "metadata": {
-    "custnum": "A000001"
-  }
+  "msg": "我想查詢帳單"
 }
 ```
 
@@ -107,8 +104,8 @@ X-API-Token: <access_token>
 | 欄位 | 必填 | 說明 |
 | --- | --- | --- |
 | `request_id` | 否 | Web 端產生的請求 ID，方便查 log。 |
-| `user_id` | 是 | 登入會員請放會員編號；訪客請放 Web 端產生的訪客 ID。 |
-| `is_logged_in` | 建議 | 登入會員 `true`，訪客 `false`。 |
+| `user_id` | 是 | `is_logged_in=true` 時放 CUST_API 客編；`false` 時放 Web 端產生的訪客流水號。 |
+| `is_logged_in` | 是 | `true` 代表 `user_id` 是客編，`false` 代表訪客流水號；每輪都須傳入。 |
 | `company_code` | 是 | 系統台代碼，例如 `tdtv`。 |
 | `msg` | 是 | 使用者本輪輸入文字。 |
 | `custnum` | 否 | CUST_API 使用的客戶編號。只有確定此值就是 CUST_API `custNo` 時才傳；也相容 `custNo`、`cust_no`、`customerNo`、`customer_number`。 |
@@ -120,7 +117,7 @@ X-API-Token: <access_token>
 {
   "status": "success",
   "request_id": "web_20260529_0001",
-  "user_id": "web:member_123456",
+  "user_id": "web:905397",
   "msg": "請問您要查詢哪一期帳單呢？",
   "links": [],
   "actions": []
@@ -135,7 +132,7 @@ Web 端主要顯示 `msg`。
 {
   "status": "success",
   "request_id": "web_20260529_0003",
-  "user_id": "web:member_123456",
+  "user_id": "web:905397",
   "msg": "大屯有線公司網址：\n<a href=\"https://www.tdtv.com.tw/\" target=\"_blank\" rel=\"noopener noreferrer\">官網</a>",
   "links": [
     {
@@ -166,8 +163,8 @@ Web 端主要顯示 `msg`。
 {
   "status": "success",
   "request_id": "web_20260626_handoff",
-  "user_id": "web:member_123456",
-  "msg": "此項需由真人文字客服協助處理。<br>請按 <a href=\"http://pweb.topmso.com.tw:96/smartCustomerService/real/member_123456/0/T?token={Base64URL token}\">轉真人文字客服</a><br>或者繼續提問",
+  "user_id": "web:905397",
+  "msg": "此項需由真人文字客服協助處理。<br>請按 <a href=\"http://pweb.topmso.com.tw:96/smartCustomerService/real/905397/0/T?token={Base64URL token}\">轉真人文字客服</a><br>或者繼續提問",
   "links": [],
   "actions": [
     {
@@ -208,7 +205,7 @@ Token 原文為 `{流水號或客編}+{Unix timestamp}`，使用雙方約定的 
 {
   "status": "success",
   "request_id": "web_20260626_handoff_confirm",
-  "user_id": "web:member_123456",
+  "user_id": "web:905397",
   "msg": "請問您目前遇到什麼問題？我會先協助您處理；若確認無法在線上協助，再幫您轉接真人客服。",
   "links": [],
   "actions": []
@@ -224,14 +221,14 @@ Token 原文為 `{流水號或客編}+{Unix timestamp}`，使用雙方約定的 
 ```json
 {
   "request_id": "web_20260529_0002",
-  "user_id": "member_123456",
+  "user_id": "905397",
   "is_logged_in": true,
   "company_code": "tdtv",
   "msg": "查五月的"
 }
 ```
 
-AI 客服系統會用 `web:{user_id}` 保存對話狀態與歷史紀錄。
+AI 客服系統會依登入狀態，用 `web:{客編}` 或 `web:guest:{流水號}` 保存對話狀態與歷史紀錄。
 
 ## 圖片 OCR API
 
@@ -295,7 +292,7 @@ OCR 後接續聊天的建議做法：
 ```json
 {
   "request_id": "web_ocr_20260603_0001",
-  "user_id": "member_123456",
+  "user_id": "905397",
   "is_logged_in": true,
   "company_code": "tdtv",
   "msg": "我上傳了一張圖片，辨識內容如下：\n代收項目: ...\n第一段條碼: ...\n第二段條碼: ...\n第三段條碼: ..."
@@ -316,12 +313,14 @@ OCR 後接續聊天的建議做法：
 
 ```json
 {
-  "user_id": "會員編號",
+  "user_id": "905397",
   "is_logged_in": true
 }
 ```
 
-AI 系統會把會員識別保存為 `member_id`，並在未另傳 `custnum` 時沿用它作為 CUST_API 的客戶編號。若 Web 端會員識別不等於真正的 CUST_API `custNo`，請另外傳 `custnum` 或 `metadata.custnum`，避免客編查詢帶錯值。
+依 Web 串接契約，`is_logged_in=true` 時 `user_id` 是 CUST_API 客編，會標記為系統帶入；`false` 時 `user_id` 只是訪客流水號，不作為客編。若舊版請求另外帶 `custnum` 或 `metadata.custnum`，明確客編優先。用戶在對話中自行輸入的其他客編不視為系統帶入，仍需核對。
+
+回應的 `user_id` 是本系統的會話識別：會員為 `web:{客編}`，訪客為 `web:guest:{流水號}`。訪客與會員因此不會因數字相同而共用對話狀態；Web 端後續請求仍傳原始 `user_id` 即可。
 
 訪客：
 
@@ -358,7 +357,7 @@ curl -X POST "https://aiia.topmso.com.tw:8000/api/v1/chat" \
   -H "X-API-Token: <access_token>" \
   -d '{
     "request_id": "web_test_001",
-    "user_id": "member_123456",
+    "user_id": "905397",
     "is_logged_in": true,
     "company_code": "tdtv",
     "msg": "我想查詢帳單"
@@ -438,7 +437,7 @@ $reply = $data['msg'] ?? '系統忙碌中，請稍後再試。';
 
 - Web 端不需要保存或回傳 `ai_state` / `history`。
 - Web 端可以只保存畫面顯示用聊天紀錄。
-- 每位使用者的 `user_id` 要穩定；同一位會員每輪都帶同一個會員編號。
+- 每位使用者的 `user_id` 要穩定；登入會員每輪都帶同一個客編與 `is_logged_in=true`。
 - 訪客也要有穩定訪客 ID，至少在同一個 session 中不可每輪改變。
 - 正式 Web 不要呼叫 `/api/web/chat`，那是內部測試入口。
 - 若正式網域使用反向代理，公開 API URL 不要加 `:8123` 或 `:8443`。

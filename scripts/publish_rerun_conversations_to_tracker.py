@@ -13,7 +13,7 @@ import argparse
 import json
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -69,7 +69,7 @@ def publish_directly_to_local_tracker(
     conn = sqlite3.connect(tracker_db)
     try:
         if not dry_run:
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now().isoformat(timespec="microseconds")
             conn.executemany(
                 """
                 INSERT INTO feedback_tracker_state (

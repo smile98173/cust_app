@@ -115,7 +115,7 @@ Request 範例：
 
 ```text
 /api/web/chat
-  -> user_id 正規化為 web:{user_id}
+  -> user_id 正規化為 web:{客編} 或 web:guest:{流水號}
   -> 用 request.tv_cable 套用系統台
   -> 寫入 channel_context
   -> run_core_chat()
@@ -134,7 +134,7 @@ POST /api/v1/chat
 
 ```json
 {
-  "user_id": "member_123456",
+  "user_id": "905397",
   "is_logged_in": true,
   "company_code": "tdtv",
   "msg": "我想知道HBO在哪個頻道"
@@ -157,7 +157,7 @@ Response：
 ```json
 {
   "status": "success",
-  "user_id": "web:member_123456",
+  "user_id": "web:905397",
   "msg": "已查詢到「HBO」相關頻道：\nHBO：第 65 台\nHBO HD：第 220 台",
   "actions": []
 }
@@ -166,17 +166,17 @@ Response：
 本系統會保存：
 
 ```text
-user_id = web:{外部 user_id}
+user_id = web:{客編} 或 web:guest:{流水號}
 is_logged_in
 known_info.member_id = member_id 或 user_id
-known_info.custnum = custnum（僅明確傳入 CUST_API 客戶編號時）
+known_info.custnum = 登入時的有效 user_id 客編，或另傳的 custnum
 ai_state / memory
 chat_logs
 company_code
 updated_at
 ```
 
-登入會員若帶 `is_logged_in=true`，後端會保存會員識別到 `member_id`，但不會自動當成 CUST_API 的 `custNo`。需要客戶身分的 CUST_API，例如帳單查詢、補發簡訊帳單、網路/電視復機、合約與服務內容查詢，只有在 Web 端明確傳入 `custnum` 或 `metadata.custnum` 時才會用客戶編號查詢；沒有 `custnum` 時會追問戶名與聯絡電話。下一輪呼叫時，外部仍只需帶相同 `user_id`、`company_code` 與新的 `msg`，會員情境建議持續帶 `is_logged_in=true`。
+Web 串接以 `is_logged_in` 判斷 `user_id`：`true` 代表有效的 CUST_API 客編，`false` 代表訪客流水號。若另傳 `custnum` 或 `metadata.custnum`，明確欄位優先。對話中自行輸入的其他客編不會標記為系統帶入；需要身分的 API 仍依工具契約核對。內部會話鍵分別為 `web:{客編}` 與 `web:guest:{流水號}`，避免兩種 ID 同值時混用。每輪請維持相同 `user_id`、`company_code`，並持續傳入 `is_logged_in`。
 
 ### LINE
 
@@ -400,10 +400,11 @@ feedback_records
   - 測試回饋資料
 ```
 
-WEB user id 會正規化為：
+WEB user id 會依登入狀態正規化為：
 
 ```text
-web:{user_id}
+web:{客編}
+web:guest:{流水號}
 ```
 
 LINE user id 會正規化為：

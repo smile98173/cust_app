@@ -2006,12 +2006,12 @@ def get_available_functions(memory: Dict[str, Any]) -> List[Dict[str, Any]]:
         build_identity_tool_schema(
             memory,
             "bill_return_line_internet",
-            "超商已繳費、網路開通、欠斷補繳後需要恢復網路",
+            "未繳費時申請或確認網路復線；是否受理以 API 回覆為準；已繳費要求復線應先上傳超商收據",
         ),
         build_identity_tool_schema(
             memory,
             "bill_return_line_tv",
-            "超商已繳費、電視開通、欠斷補繳後恢復電視，或電視授權到期",
+            "未繳費時申請或確認有線電視復線，或確認電視授權到期；是否受理以 API 回覆為準；已繳費要求復線應先上傳超商收據",
         ),
         {
             "name": "create_repair_ticket",

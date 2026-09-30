@@ -74,26 +74,26 @@ aicust_service.web_conversations
 `id` 使用：
 
 ```text
-web:{user_id}
+web:{客編} 或 web:guest:{流水號}
 ```
 
 例如：
 
 ```text
-web:member_123456
-web:guest_000001
+web:905397
+web:guest:guest_000001
 ```
 
 文件範例：
 
 ```json
 {
-  "_id": "web:member_123456",
-  "id": "web:member_123456",
+  "_id": "web:905397",
+  "id": "web:905397",
   "doc_type": "conversation",
-  "user_id": "web:member_123456",
+  "user_id": "web:905397",
   "channel": "web",
-  "customer_key": "web:member_123456",
+  "customer_key": "web:905397",
   "is_logged_in": true,
   "ai_state": {
     "conversation_state": {
@@ -104,9 +104,9 @@ web:guest_000001
     "company_code": "tdtv",
     "company": "大屯有線",
     "known_info": {
-      "external_user_id": "member_123456",
+      "external_user_id": "905397",
       "is_logged_in": true,
-      "custnum": "member_123456"
+      "custnum": "905397"
     },
     "pending_tool": null,
     "pending_tool_args": [],
@@ -137,14 +137,14 @@ web:guest_000001
 }
 ```
 
-Web 登入會員會在進 AI 流程前把 `user_id` 視為會員編號，並寫入：
+Web 登入會員會在進 AI 流程前，依 `is_logged_in=true` 把有效數字 `user_id` 視為客編，並寫入：
 
 ```text
 ai_state.known_info.is_logged_in
 ai_state.known_info.custnum
 ```
 
-`custnum` 只在 Web 端明確傳入 CUST_API 客戶編號時保存；`user_id` / `member_id` 只代表 Web 使用者識別，不會自動當成 CUST_API `custNo`。需要客戶身分的 CUST_API 會優先用 `custnum` 查詢；沒有 `custnum` 時，流程才會追問戶名與聯絡電話。
+`is_logged_in=true` 時，`user_id` 是 CUST_API 客編；`false` 時是訪客流水號，不可拿來查客戶資料。另傳 `custnum` 時以明確欄位優先。聊天中自行輸入的其他客編只標記為用戶提供，不能繼承系統驗證狀態。
 
 ## LINE Conversation 文件
 

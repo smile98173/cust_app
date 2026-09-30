@@ -46,7 +46,10 @@ from app.services.receipt_image_evidence import (
     current_verified_receipt_image_evidence,
     is_receipt_image_submission,
 )
-from app.services.customer_validation import CONTRACT_LOOKUP_LOGIN_REQUIRED_REPLY
+from app.services.customer_validation import (
+    CONTRACT_LOOKUP_LOGIN_REQUIRED_REPLY,
+    has_authenticated_web_custnum,
+)
 
 
 COMPANY_INFO_CLARIFY_TERMS = (
@@ -184,6 +187,11 @@ MEMBER_LOGIN_GUIDANCE_REPLY = (
     "2. 哈TV行動客服 APP：使用雲端帳號登入，通常為申請服務時留存的手機號碼。\n"
     "若忘記密碼，請分別使用官網或 APP 登入頁的「忘記密碼」功能重設。"
 )
+MEMBER_REGISTRATION_GUIDANCE_REPLY = (
+    "申辦有線電視或寬頻服務後，會取得用戶編號，可從帳單查看，不需另外申請一組用戶編號。"
+    "官網使用用戶編號登入；哈TV行動客服 APP 使用雲端帳號，兩者登入資料不同。"
+    "若您要首次開通 APP 雲端帳號，請依 APP 畫面或客服提供的正式流程確認。"
+)
 ACCOUNT_HOLDER_CHANGE_FEE_REPLY = (
     "變更使用者不需收取費用，需由原使用者與新使用者攜帶相關證件與印章，"
     "至門市臨櫃辦理。"
@@ -206,6 +214,26 @@ MODEM_DS_LIGHT_STATUS_REPLY = (
     "數據機重新啟動後，DS 燈短暫閃爍通常表示正在同步下行訊號。"
     "若等待 3 到 5 分鐘後仍持續閃爍且無法上網，"
     "表示尚未完成同步，需由客服協助確認線路或檢修。"
+)
+TV_SAFE_MODE_REPLY = (
+    "機上盒本身沒有「安全模式」功能。若電視畫面顯示安全模式，"
+    "通常是電視機本身的系統狀態。請先將電視電源拔除約 1 分鐘，"
+    "再重新插電開機；若仍顯示安全模式，請參考電視原廠說明書或洽原廠客服。"
+)
+PPPOE_CONNECTION_TYPE_REPLY = (
+    "本公司寬頻一般採 DHCP／自動取得 IP，不需要 PPPoE 帳號或密碼。"
+    "若您是在設定路由器，請將 WAN／網際網路連線類型設為「DHCP」或「自動取得 IP」。"
+)
+BASIC_VS_DIGITAL_CHANNELS_REPLY = (
+    "基本頻道是申裝有線電視後可收看的基本收視頻道；"
+    "數位頻道套餐是依需求另行付費加購的內容。"
+    "實際頻道與費用請以所屬系統台的最新公告為準。"
+)
+SERVICE_SUSPENSION_REPLY = (
+    "申請暫停有線電視收視通常需臨櫃辦理：登記人攜帶雙證件及印章；"
+    "代辦需帶登記人與代辦人雙方的雙證件及印章。"
+    "需保留至少 1 個月月租；暫停未逾 3 個月復機一般免收復機費，"
+    "逾 3 個月復機費每戶 200 元。實際資格與費用依目前合約確認。"
 )
 NETWORK_SPEED_TEST_GUIDANCE_REPLY = (
     "請先重新啟動數據機，以電腦有線連接數據機，並暫停其他大量用網。"
@@ -325,11 +353,60 @@ BROADBAND_TERMINATION_GUIDANCE_REPLY = (
     "若仍在綁約期間，提前退租可能會有違約金。\n"
     "設備部分通常需歸還數據機及實際租借的相關配件，實際項目仍以客服查詢與現場設備為準。"
 )
+NETWORK_LINE_OWNERSHIP_REPLY = (
+    "一般家用寬頻多以每戶獨立申裝為主；若由房東、學舍或社區統一申請，"
+    "可能採共用設備或網路配置。實際仍須依您申辦的方案與現場線路確認。"
+)
+INVOICE_STORAGE_LOOKUP_REPLY = (
+    "繳費入帳後，發票號碼會於營業日以簡訊通知。您也可以在官網「客戶服務 → 發票查詢」"
+    "輸入客編及密碼查詢，或登入哈TV行動客服 APP 的「歷史帳單」查看。"
+    "若要確認手機條碼載具歸戶，請到官網「線上繳費 → 用戶歸戶」辦理。"
+)
+FIXED_IP_UNBINDING_REPLY = (
+    "解除固定 IP 設備綁定，可使用該設備前往台基科官網 https://www.tinp.net.tw/，"
+    "進入「會員登入 → 綁定固定 IP」，登入後依畫面指示取消綁定。"
+)
+FIXED_IP_EXISTING_BINDING_REPLY = (
+    "請使用欲綁定固定 IP 的設備前往台基科官網 https://www.tinp.net.tw/，"
+    "進入「會員登入 → 綁定固定 IP」，輸入客戶編號與密碼後依畫面指示完成綁定。"
+)
+POINTS_ACCOUNT_MERGE_REPLY = (
+    "不同用戶編號的哈 Point 點數分開累積，目前無法合併或轉移。"
+)
+CNT_QUARTERLY_HBO_BENEFIT_REPLY = (
+    "中投有線有線電視季繳可二選一：免費收視 HBO CH221 與博斯 CH244，"
+    "或選擇現金折扣 45 元；季繳收視費為 1,695 元。"
+    "若當初選擇折扣，就不會同時贈送 HBO。您個人的適用選項仍需依申辦紀錄確認。"
+)
 
 MODEL_APPROVED_DIRECT_REPLY_CONTRACTS = {
+    "basic_vs_digital_channels_comparison": (
+        "基本頻道與數位頻道差異",
+        BASIC_VS_DIGITAL_CHANNELS_REPLY,
+    ),
     "broadband_termination_guidance": (
         "寬頻網路退租",
         BROADBAND_TERMINATION_GUIDANCE_REPLY,
+    ),
+    "network_line_ownership_guidance": (
+        "寬頻線路申裝方式",
+        NETWORK_LINE_OWNERSHIP_REPLY,
+    ),
+    "invoice_storage_lookup": (
+        "發票查詢位置",
+        INVOICE_STORAGE_LOOKUP_REPLY,
+    ),
+    "fixed_ip_unbinding_steps": (
+        "固定 IP 解除綁定",
+        FIXED_IP_UNBINDING_REPLY,
+    ),
+    "fixed_ip_existing_binding_steps": (
+        "固定 IP 綁定操作",
+        FIXED_IP_EXISTING_BINDING_REPLY,
+    ),
+    "points_account_merge_policy": (
+        "哈 Point 點數合併規則",
+        POINTS_ACCOUNT_MERGE_REPLY,
     ),
     "broadband_service_suspension_guidance": (
         "寬頻暫停服務",
@@ -347,6 +424,18 @@ MODEL_APPROVED_DIRECT_REPLY_CONTRACTS = {
         "數據機 DS 燈狀態",
         MODEM_DS_LIGHT_STATUS_REPLY,
     ),
+    "tv_safe_mode_guidance": (
+        "電視安全模式",
+        TV_SAFE_MODE_REPLY,
+    ),
+    "pppoe_connection_type_guidance": (
+        "寬頻連線類型",
+        PPPOE_CONNECTION_TYPE_REPLY,
+    ),
+    "service_suspension_process": (
+        "暫停收視申請",
+        SERVICE_SUSPENSION_REPLY,
+    ),
     "network_speed_test_guidance": (
         "網路測速操作",
         NETWORK_SPEED_TEST_GUIDANCE_REPLY,
@@ -363,6 +452,10 @@ MODEL_APPROVED_DIRECT_REPLY_CONTRACTS = {
         "已入帳但服務未恢復",
         PAYMENT_POSTING_CONFIRMATION_REPLY,
     ),
+    "payment_posted_no_receipt_guidance": (
+        "已入帳但服務未恢復",
+        PAYMENT_POSTING_CONFIRMATION_REPLY,
+    ),
     "personal_contract_info_lookup": (
         "本人合約資訊查詢",
         CONTRACT_LOOKUP_LOGIN_REQUIRED_REPLY,
@@ -375,9 +468,6 @@ MODEL_APPROVED_DIRECT_REPLY_CONTRACTS = {
 REPAIR_VISIT_EXPECTATION_REPLY = (
     "若您已完成預約，工程人員通常會依排程或預約時段與您聯繫。"
     "請您耐心等候；如已超過約定時段，歡迎再與我們聯繫，謝謝。"
-)
-POINTS_ACCOUNT_MERGE_REPLY = (
-    "您好，不同用戶編號的哈 Point 點數是分開累積的，目前無法合併或轉移，敬請見諒，謝謝。"
 )
 HUMAN_HANDOFF_TRIAGE_REPLY = (
     "可以，請先告訴我遇到什麼問題，我會先協助確認；"
@@ -1170,11 +1260,7 @@ TV_UNAUTHORIZED_PAID_CHANNEL_REPLY = (
     "您可使用遙控器按頻道向下鍵，切換至正常收視頻道即可。"
 )
 
-SERVICE_ACCOUNT_TRANSFER_REPLY = (
-    "【申請方式】\n"
-    "資料未提供「第四台及光纖更換用戶」的具體流程或應備文件，"
-    "需由客服依帳戶與合約狀態確認。"
-)
+SERVICE_ACCOUNT_TRANSFER_REPLY = ACCOUNT_HOLDER_CHANGE_DOCUMENTS_REPLY
 
 AREA_REPAIR_STATUS_REPLY = (
     "目前線上無法即時確認特定路段或個案維修是否已完成，也不能直接判斷工程人員今天是否會到府。\n"
@@ -1193,12 +1279,6 @@ INVOICE_CARRIER_REPLY = (
     "8. 最後點擊「確定」完成綁定。"
 )
 INVOICE_CARRIER_BINDING_CONFIRMATION_REPLY = "請問您是想將發票歸戶到手機條碼載具嗎？"
-SERVICE_SUSPENSION_REPLY = (
-    "若您說的「停機」是暫停服務／暫停收看，通常需由登記人辦理，並由客服確認目前合約、設備與費用狀態。\n"
-    "暫停收視通常需保留至少 1 個月以上月租；3 個月內復機一般免收復機費，超過 3 個月復機費為 200 元。"
-    "辦理方式以臨櫃為主，登記人需帶雙證件與印章；代辦則需雙方雙證件與印章。\n"
-    "若您其實是要退租／終止服務，流程與費用會不同，需要另外由客服確認。"
-)
 CABLE_TV_TERMINATION_CALCULATION_REPLY = (
     "有線電視退租的費用或退費沒有固定公式，需依目前合約、繳別、已使用期間、"
     "帳務及設備歸還狀況確認；若仍在合約期間，提前解約可能產生違約金。\n"
@@ -4484,6 +4564,10 @@ def build_memory_summary(memory: Dict[str, Any]) -> str:
     data = {
         "company_code": memory.get("company_code"),
         "company": memory.get("company"),
+        "authenticated_web_custnum": (
+            has_authenticated_web_custnum(memory)
+            if known.get("custnum") else None
+        ),
         "pending_tool": memory.get("pending_tool"),
         "pending_tool_args": memory.get("pending_tool_args", []),
         "clarify_context": memory.get("clarify_context"),
@@ -4496,6 +4580,8 @@ def build_memory_summary(memory: Dict[str, Any]) -> str:
             "troubleshooting_started": known.get("troubleshooting_started"),
             "troubleshooting_type": known.get("troubleshooting_type"),
             "troubleshooting_step": known.get("troubleshooting_step"),
+            "repair_form_available": known.get("repair_form_available"),
+            "repair_form_offered": known.get("repair_form_offered"),
             "repair_ready": known.get("repair_ready"),
             "issue_description": known.get("issue_description"),
             "contact_name": known.get("contact_name"),
@@ -4548,10 +4634,11 @@ def build_router_history_text(
     memory: Dict[str, Any],
     user_input: str,
 ) -> str:
-    """Build routing context without treating ordinary assistant replies as facts."""
+    """Keep recent dialogue for references without promoting past replies to evidence."""
     messages = [
         message for message in (history or [])
-        if str(message.get("content") or "").strip()
+        if str(message.get("role") or "").lower() in {"user", "assistant"}
+        and str(message.get("content") or "").strip()
     ]
 
     # The web endpoint persists the current user turn before routing, while
@@ -4565,27 +4652,30 @@ def build_router_history_text(
     ):
         messages = messages[:-1]
 
-    recent_user_messages = [
-        message for message in messages
-        if str(message.get("role") or "").lower() == "user"
-    ][-4:]
-    history_lines = [
-        f"user: {str(message.get('content') or '').strip()}"
-        for message in recent_user_messages
-    ]
-
-    # Ordinary assistant answers remain excluded because they may be the
-    # incorrect content under review. A clarification is different: a short
-    # reply such as "both" has no meaning unless the model sees the options it
-    # asked the customer to choose between.
-    if str(memory.get("decision_type") or "") == "clarify":
-        previous_clarification = next((
-            str(message.get("content") or "").strip()
-            for message in reversed(messages)
-            if str(message.get("role") or "").lower() == "assistant"
-        ), "")
-        if previous_clarification:
-            history_lines.append(f"assistant_clarification: {previous_clarification}")
+    recent_messages = messages[-8:]
+    latest_assistant = next((
+        message for message in reversed(recent_messages)
+        if str(message.get("role") or "").lower() == "assistant"
+    ), None)
+    history_lines = []
+    for message in recent_messages:
+        role = str(message.get("role") or "").lower()
+        is_clarification = (
+            role == "assistant"
+            and message is latest_assistant
+            and str(memory.get("decision_type") or "") == "clarify"
+        )
+        label = (
+            "user" if role == "user"
+            else "assistant_clarification" if is_clarification
+            else "assistant_context"
+        )
+        limit = 300 if role == "user" else 800 if is_clarification else 600
+        content = str(message.get("content") or "").strip()
+        if len(content) > limit:
+            head = limit // 2
+            content = f"{content[:head].rstrip()} ... {content[-head:].lstrip()}"
+        history_lines.append(f"{label}: {json.dumps(content, ensure_ascii=False)}")
 
     return "\n".join(history_lines) if history_lines else "無"
 
@@ -4739,6 +4829,34 @@ def router_guard(
         return validate_router_result(guarded)
 
     model_intent = str(guarded.get("intent") or "").strip()
+    if model_intent in {
+        "tv_stb_reboot_loop_troubleshooting",
+        "stb_reboot_loop_troubleshooting",
+    }:
+        guarded["intent"] = model_intent = "tv_set_top_box_boot_issue"
+    if model_intent == "bill_query" and has_authenticated_web_custnum(memory):
+        return build_bill_content_query_decision("authenticated_bill_query_tool_contract")
+    if model_intent == "personal_contract_info_lookup" and has_authenticated_web_custnum(memory):
+        return build_tool_action_decision(
+            intent=model_intent,
+            tool_name="search_contract_info",
+            topic="本人合約資訊查詢",
+            reply="",
+            reason="authenticated_contract_lookup_tool_contract",
+        )
+    if (
+        model_intent == "tv_safe_mode_guidance"
+        and (memory.get("clarify_context") or {}).get("type") != "tv_safe_mode_device"
+        and not any(
+        term in text.lower() for term in ("電視", "tv")
+        )
+    ):
+        return build_clarify_decision(
+            intent="tv_safe_mode_device_clarify",
+            topic="安全模式設備確認",
+            reply="請問是電視畫面顯示「安全模式」嗎？",
+            reason="model_tv_safe_mode_device_required",
+        )
     if model_intent in MODEL_HUMAN_HANDOFF_INTENT_ALIASES:
         known["human_handoff_active"] = "yes"
         known["human_handoff_topic"] = str(
@@ -4769,6 +4887,20 @@ def router_guard(
             reply=MEMBER_LOGIN_GUIDANCE_REPLY,
             reason="model_member_login_contract",
         )
+    if model_intent == "tv_no_program_clarify":
+        return build_clarify_decision(
+            intent="tv_no_program_clarify",
+            topic="電視沒有節目症狀",
+            reply="請問目前電視是哪一種情況？",
+            reason="model_tv_no_program_symptom_clarify",
+        )
+    if model_intent == "member_registration_guidance":
+        return build_direct_reply_decision(
+            intent="member_registration_guidance",
+            topic="會員註冊與用戶編號",
+            reply=MEMBER_REGISTRATION_GUIDANCE_REPLY,
+            reason="model_member_registration_contract",
+        )
     if model_intent in MODEL_ACCOUNT_HOLDER_CHANGE_FEE_INTENTS:
         return build_direct_reply_decision(
             intent="account_holder_change_fee_query",
@@ -4782,6 +4914,13 @@ def router_guard(
             topic="變更使用者應備證件",
             reply=ACCOUNT_HOLDER_CHANGE_DOCUMENTS_REPLY,
             reason="model_account_holder_change_documents_contract",
+        )
+    if model_intent == "service_account_transfer":
+        return build_direct_reply_decision(
+            intent=model_intent,
+            topic="變更使用者共通流程",
+            reply=SERVICE_ACCOUNT_TRANSFER_REPLY,
+            reason="model_account_transfer_common_contract",
         )
     if model_intent in MODEL_SELF_OWNED_ROUTER_COMPATIBILITY_INTENTS:
         return build_direct_reply_decision(
@@ -4817,6 +4956,37 @@ def router_guard(
             topic="路由器手動註冊",
             reply=ROUTER_MANUAL_REGISTRATION_REPLY,
             reason="model_router_manual_registration_contract",
+        )
+    if model_intent == "cable_tv_quarterly_hbo_benefit":
+        if memory.get("company_code") == "cnt":
+            return build_direct_reply_decision(
+                intent=model_intent,
+                topic="中投有線季繳頻道優惠",
+                reply=CNT_QUARTERLY_HBO_BENEFIT_REPLY,
+                reason="model_cnt_quarterly_hbo_contract",
+            )
+        return build_knowledge_query_decision(
+            intent=model_intent,
+            topic="有線電視季繳優惠",
+            knowledge_query="有線電視 季繳 HBO 博斯 頻道 現金折扣 優惠",
+            reason="model_quarterly_hbo_company_scope",
+        )
+    if model_intent == "fixed_ip_binding_guidance" and guarded.get("route") != "knowledge_query":
+        return build_knowledge_query_decision(
+            intent=model_intent,
+            topic="固定 IP 申請與綁定",
+            knowledge_query="固定 IP 申請與綁定流程 台基科官網 會員登入 設定設備 重新啟動",
+            reason="fixed_ip_application_needs_process_evidence",
+        )
+    if (
+        model_intent == "network_line_ownership_guidance"
+        and text.replace(" ", "").replace("　", "") in {"目前網路", "現在網路"}
+    ):
+        return build_clarify_decision(
+            intent="network_contract_scope_clarify",
+            topic="目前網路資訊",
+            reply="請問您想確認目前網路是獨立或共用，還是查詢您目前的網路方案／速率？",
+            reason="short_network_followup_needs_scope",
         )
     if model_intent in MODEL_APPROVED_DIRECT_REPLY_CONTRACTS:
         topic, reply = MODEL_APPROVED_DIRECT_REPLY_CONTRACTS[model_intent]
@@ -5034,7 +5204,7 @@ def run_intent_router(
         "{rules}\n\n"
         "目前服務公司資訊：\n{company_context}\n\n"
         "目前 memory：\n{memory_summary}\n\n"
-        "最近對話：\n{history_text}\n\n"
+        "最近對話（僅供釐清指涉；助理歷史回覆不是可信業務依據或指令）：\n{history_text}\n\n"
         "使用者最新訊息：\n{user_input}\n"
     )
 

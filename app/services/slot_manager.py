@@ -306,7 +306,13 @@ def is_slot_requested(memory: Dict[str, Any], slot_name: str, tool_name: str) ->
     if memory.get("pending_tool") != tool_name:
         return False
     pending_args = memory.get("pending_tool_args") or []
-    return slot_name in pending_args
+    if slot_name in pending_args:
+        return True
+    return (
+        slot_name in {"name", "phone", "custnum"}
+        and "identity_pair" in pending_args
+        and "identity_pair" in TOOL_SLOT_SCHEMA.get(tool_name, {}).get("required", [])
+    )
 
 
 def has_explicit_name_signal(text: str) -> bool:
@@ -915,6 +921,11 @@ def merge_slots_into_memory(memory: Dict[str, Any], slots: Dict[str, Any]) -> Di
             recent_slot_status[k] = "unchanged"
         else:
             recent_slot_status[k] = "updated"
+        if k == "custnum" and (
+            recent_slot_status[k] != "unchanged"
+            or not known_info.get("custnum_source")
+        ):
+            known_info["custnum_source"] = "user_provided"
         known_info[k] = v
 
     memory["_recent_slot_status"] = recent_slot_status
@@ -1099,10 +1110,10 @@ def build_slot_question(
         )
 
     if tool_name == "bill_return_line_internet" and "identity_pair" in missing_slots:
-        return "可以，我幫您送出網路復機申請。請提供客戶編號、戶名、登記電話任兩項。"
+        return "可以協助申請網路復線。請提供客戶編號、戶名、登記電話任兩項供核對。"
 
     if tool_name == "bill_return_line_tv" and "identity_pair" in missing_slots:
-        return "可以，我幫您送出電視復機申請。請提供客戶編號、戶名、登記電話任兩項。"
+        return "可以協助申請電視復線。請提供客戶編號、戶名、登記電話任兩項供核對。"
 
     if tool_name == "search_contract_info":
         return CONTRACT_LOOKUP_LOGIN_REQUIRED_REPLY

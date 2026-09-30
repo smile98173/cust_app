@@ -410,6 +410,51 @@ class FeedbackTrackerConversationLogTest(unittest.TestCase):
         self.assertEqual(row["acceptance_feedback"], "回答正確")
         self.assertEqual(row["updated_by"], "online-csr")
 
+    def test_sync_compares_mixed_timezone_timestamps_by_instant(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "feedback_tracker.db"
+            with patch.object(feedback_tracker_service, "TRACKER_DB_FILE", database_path), \
+                    patch.object(feedback_tracker_service, "migrate_legacy_tracker_data"):
+                feedback_tracker_service.init_tracker_schema()
+                conn = feedback_tracker_service.tracker_db_conn()
+                try:
+                    conn.execute(
+                        "INSERT INTO feedback_tracker_state "
+                        "(feedback_id, status, review_status, adjusted_conversation_json, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        ("FB-TZ", "processed", "pending", '[{"content":"old"}]',
+                         "2026-09-30T14:33:33.062631"),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                bundle = {
+                    "kind": "feedback_tracker_updates",
+                    "case_definitions": [],
+                    "case_states": [],
+                    "feedback_states": [{
+                        "feedback_id": "FB-TZ", "status": "processed",
+                        "review_status": "pending",
+                        "adjusted_conversation_json": '[{"content":"new"}]',
+                        "updated_at": "2026-09-30T07:14:21.947755+00:00",
+                    }],
+                }
+                self.assertEqual(feedback_tracker_service.apply_tracking_update_bundle(bundle), 1)
+                bundle["feedback_states"][0]["adjusted_conversation_json"] = '[{"content":"stale"}]'
+                bundle["feedback_states"][0]["updated_at"] = "2026-09-30T07:00:00+00:00"
+                self.assertEqual(feedback_tracker_service.apply_tracking_update_bundle(bundle), 0)
+                conn = feedback_tracker_service.tracker_db_conn()
+                try:
+                    row = conn.execute(
+                        "SELECT adjusted_conversation_json FROM feedback_tracker_state "
+                        "WHERE feedback_id='FB-TZ'"
+                    ).fetchone()
+                finally:
+                    conn.close()
+
+        self.assertEqual(row["adjusted_conversation_json"], '[{"content":"new"}]')
+
     def test_publish_bundle_creates_missing_august_case(self):
         payload = {
             "kind": "feedback_tracker_updates",

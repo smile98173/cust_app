@@ -95,7 +95,7 @@ from app.services.receipt_image_evidence import (
     verify_receipt_image_evidence_token,
 )
 from app.services.error_logging import log_exception, public_error_response
-from app.services.customer_validation import normalize_tel
+from app.services.customer_validation import normalize_customer_number, normalize_tel
 from app.services.kb_admin_service import (
     create_document,
     delete_document,
@@ -338,7 +338,14 @@ def get_external_is_logged_in(request: ExternalChatRequest) -> bool:
         return bool(request.is_logged_in)
     if request.user and request.user.is_logged_in is not None:
         return bool(request.user.is_logged_in)
-    return bool(get_external_member_id(request, ""))
+    return False
+
+
+def normalize_external_session_user_id(request: ExternalChatRequest, raw_user_id: str) -> str:
+    channel = (request.channel or "web").strip().lower()
+    if channel == "web" and not get_external_is_logged_in(request):
+        return normalize_channel_user_id(channel, f"guest:{raw_user_id}")
+    return normalize_channel_user_id(channel, raw_user_id)
 
 
 def get_external_member_id(request: ExternalChatRequest, raw_user_id: str) -> Optional[str]:
@@ -346,7 +353,7 @@ def get_external_member_id(request: ExternalChatRequest, raw_user_id: str) -> Op
         return request.member_id
     if request.user and request.user.member_id:
         return request.user.member_id
-    if (request.is_logged_in is True or (request.user and request.user.is_logged_in is True)) and raw_user_id:
+    if get_external_is_logged_in(request) and raw_user_id:
         return raw_user_id
     return None
 
@@ -421,13 +428,21 @@ def apply_external_user_context(
     if member_id:
         known_info["member_id"] = member_id
 
-    if explicit_custnum and is_logged_in:
-        known_info["custnum"] = explicit_custnum
+    prior_web_custnum = (
+        known_info.get("custnum")
+        if known_info.get("custnum_source") == "web_authenticated" else None
+    )
+    web_custnum = (
+        normalize_customer_number(explicit_custnum or prior_web_custnum or raw_user_id)
+        if is_logged_in else None
+    )
+    if web_custnum and (
+        known_info.get("custnum_source") != "user_provided"
+        or known_info.get("custnum") == web_custnum
+    ):
+        known_info["custnum"] = web_custnum
         known_info["custnum_source"] = "web_authenticated"
-    elif member_id and is_logged_in:
-        known_info["custnum"] = member_id
-        known_info["custnum_source"] = "web_authenticated"
-    elif not is_logged_in:
+    elif not is_logged_in and known_info.get("custnum_source") == "web_authenticated":
         known_info.pop("custnum", None)
         known_info.pop("custnum_source", None)
     if explicit_name:
@@ -1599,7 +1614,7 @@ async def external_chat(request: ExternalChatRequest):
     try:
         raw_user_id = get_external_user_id(request)
         user_text = get_external_message_text(request)
-        user_id = normalize_channel_user_id(request.channel or "web", raw_user_id)
+        user_id = normalize_external_session_user_id(request, raw_user_id)
         memory = memory_from_external_state(request, user_id)
         memory = attach_verified_receipt_image_evidence(
             memory,

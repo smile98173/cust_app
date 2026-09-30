@@ -16,6 +16,7 @@ from app.services.router_prompt import (
     select_runtime_policy_keys,
     select_runtime_prompt_modules,
 )
+from app.services.regional_policy import build_policy_prompt
 
 
 class UsageChatModel:
@@ -32,13 +33,102 @@ class UsageChatModel:
 
 
 class PromptUsageOptimizationTest(unittest.TestCase):
+    def test_repair_form_choice_after_guidance_is_in_support_module(self):
+        scoped = build_contextual_runtime_intent_router_rules(
+            "登記維修",
+            {"company_code": "tdtv", "known_info": {
+                "troubleshooting_started": "yes",
+                "troubleshooting_type": "remote",
+                "troubleshooting_step": "remote_check_light",
+            }},
+            [],
+        )
+        self.assertIn("已給排錯指引", scoped)
+        self.assertIn("自行申告", scoped)
+        self.assertIn("repair_form_guidance", scoped)
+
+        active = build_contextual_runtime_intent_router_rules(
+            "登記維修",
+            {"company_code": "tdtv", "known_info": {"repair_form_available": "yes"}},
+            [],
+        )
+        self.assertIn("提供表單連結不是建立工單", active)
+        self.assertNotIn("提供表單連結不是建立工單", scoped)
+
+    def test_remote_pairing_contract_preserves_controller_and_target(self):
+        scoped = build_contextual_runtime_intent_router_rules(
+            "Panasonic遙控器配對哈TV機上盒",
+            {"company_code": "tdtv", "known_info": {}},
+            [],
+        )
+
+        self.assertIn("主控遙控器", scoped)
+        self.assertIn("受控設備", scoped)
+        self.assertIn("機上盒遙控器", scoped)
+        self.assertIn("學習端", scoped)
+        self.assertIn("電視遙控器", scoped)
+        self.assertIn("訊號來源", scoped)
+        self.assertIn("預設", scoped)
+        self.assertIn("不反問", scoped)
+        self.assertIn("remote_power_learning", scoped)
+
+    def test_fixed_ip_allocation_statement_continues_to_binding(self):
+        scoped = build_contextual_runtime_intent_router_rules(
+            "已有固定 IP 數量",
+            {"company_code": "tdtv", "last_knowledge_intent": "fixed_ip_binding_guidance", "known_info": {}},
+            [],
+        )
+        self.assertIn("已核配的陳述", scoped)
+        self.assertIn("固定 IP 綁定", scoped)
+        self.assertIn("未詢問本人核配幾組", scoped)
+        self.assertIn("即使提到數量", scoped)
+        self.assertIn("direct_reply、intent = fixed_ip_existing_binding_steps", scoped)
+
+    def test_transfer_general_process_contract_is_loaded_without_billing_module(self):
+        scoped = build_contextual_runtime_intent_router_rules(
+            "了解過戶流程",
+            {"company_code": "wctv", "known_info": {}},
+            [],
+        )
+        self.assertIn("過戶共通流程免問服務", scoped)
+        self.assertIn("account_holder_change_required_documents", scoped)
+
+    def test_device_troubleshooting_request_loads_support_contract(self):
+        modules = select_runtime_prompt_modules(
+            "機上盒排除", {"company_code": "tdtv", "known_info": {}}, []
+        )
+        scoped = build_contextual_runtime_intent_router_rules(
+            "機上盒排除", {"company_code": "tdtv", "known_info": {}}, []
+        )
+
+        self.assertIn("support", modules)
+        self.assertIn("repair_troubleshooting_intake", scoped)
+
+    def test_passed_contracts_remain_in_scoped_prompt(self):
+        campaign = build_contextual_runtime_intent_router_rules(
+            "2026/08/01裝機~2026/12/31退租要繳多少違約金",
+            {"company_code": "tdtv", "last_campaign_topic": "飆網守護家", "known_info": {}},
+            [],
+        )
+        sms = build_contextual_runtime_intent_router_rules(
+            "手機沒有收到繳費簡訊",
+            {"company_code": "tdtv", "known_info": {}},
+            [],
+        )
+
+        self.assertIn("promotion_query_kind = campaign_detail", campaign)
+        self.assertIn("730 天", campaign)
+        self.assertIn("勿答一般退租", campaign)
+        self.assertIn("補發簡訊帳單：tool_action、send_message", sms)
+        self.assertIn("須戶名與登記電話", sms)
+
     def test_runtime_router_contract_is_compact_and_keeps_safety_boundaries(self):
         runtime = build_runtime_intent_router_rules()
         contextual = build_contextual_runtime_intent_router_rules(
             "如何登入會員", {"company_code": "tdtv", "known_info": {}}, []
         )
 
-        self.assertLess(len(runtime), 15_000)
+        self.assertLess(len(runtime), 17_500)
         self.assertLess(len(contextual), len(runtime))
         self.assertIn("每輪由你依語意判斷", runtime)
         self.assertIn("不可直接 create_repair_ticket", runtime)
@@ -61,6 +151,7 @@ class PromptUsageOptimizationTest(unittest.TestCase):
         self.assertIn("intent = broadband_termination_guidance", runtime)
         self.assertIn("intent = human_handoff_request", runtime)
         self.assertIn("兩項服務都斷訊", runtime)
+        self.assertIn("報修需求不等於同意轉真人", runtime)
 
     def test_full_runtime_prompt_includes_every_registered_intent(self):
         runtime = build_runtime_intent_router_rules()
@@ -96,7 +187,20 @@ class PromptUsageOptimizationTest(unittest.TestCase):
         self.assertIn("【帳務、復線與工具】", billing)
         self.assertNotIn("【優惠、方案與裝機】", billing)
         self.assertNotIn("【退租、停機與方案變更】", billing)
+        self.assertNotIn("【網路與設備】", billing)
+        self.assertNotIn("【影音與服務】", billing)
         self.assertIn("personal_contract_info_lookup", billing)
+        self.assertIn("bill_query", billing)
+        self.assertIn("tool_name = search_bill", billing)
+        self.assertIn("客戶編號、戶名、登記電話任兩項", billing)
+        self.assertNotIn("帳單金額／待繳狀態／本人合約只能", billing)
+        self.assertIn("intent = reconnection", billing)
+        self.assertIn("未繳費且明確要求復線", billing)
+        self.assertIn("已繳費並要求網路／電視復線", billing)
+        self.assertIn("先請上傳完整超商收據", billing)
+        self.assertIn("tool_name = bill_return_line_internet", billing)
+        self.assertIn("bill_return_line_tv", billing)
+        self.assertNotIn("尚未繳費不得執行復線", billing)
         self.assertNotIn("router_path_slow_issue", billing)
 
         self.assertIn("【退租、停機與方案變更】", termination)
@@ -104,12 +208,15 @@ class PromptUsageOptimizationTest(unittest.TestCase):
         self.assertNotIn("【帳務、復線與工具】", termination)
 
         self.assertIn("【故障、報修與真人】", network)
+        self.assertIn("【網路與設備】", network)
         self.assertIn("modem_dual_router_dhcp_guidance", network)
         self.assertNotIn("【帳務、復線與工具】", network)
 
     def test_contextual_prompt_selection_covers_active_feedback_domains(self):
         cases = {
             "本期帳單金額查詢": {"billing"},
+            "我要辦理網路復線": {"billing"},
+            "我要辦理電視復線": {"billing", "services"},
             "解約要繳回什麼東西呢": {"termination"},
             "請提供500M網路活動的電視和冰箱型號": {"promotion"},
             "能取消寬頻網路嗎": {"termination"},
@@ -132,6 +239,53 @@ class PromptUsageOptimizationTest(unittest.TestCase):
             with self.subTest(user_input=user_input):
                 selected = set(select_runtime_prompt_modules(user_input, {}, []))
                 self.assertTrue(expected.issubset(selected), selected)
+
+    def test_accepted_feedback_intents_survive_contextual_prompt_selection(self):
+        cases = {
+            "電視出現安全模式需要排除": ("support", "tv_safe_mode_guidance"),
+            "哈tv頻道不見": ("support", "tv_partial_channel_issue"),
+            "頻道跑掉了": ("support", "tv_partial_channel_issue"),
+            "自動扣款": ("billing", "auto_payment_guidance"),
+            "網路合約": ("billing", "network_contract_scope_clarify"),
+            "我要詢問PPPOE帳號密碼": ("network", "pppoe_connection_type_guidance"),
+            "基本頻道跟數位頻道是什麼區別": ("services", "basic_vs_digital_channels_comparison"),
+            "我想知道發票中獎會不會通知": ("billing", "invoice_win_notification"),
+            "我的帳號密碼忘記了": ("billing", "member_login_scope_clarify"),
+            "有沒有加值YouTube": ("services", "youtube_on_tv_guidance"),
+            "我要停機": ("termination", "service_suspension_process"),
+            "你好我的LINE TV不續訂": ("termination", "line_tv_cancellation_guidance"),
+        }
+        for user_input, (module, intent) in cases.items():
+            with self.subTest(user_input=user_input):
+                self.assertIn(module, select_runtime_prompt_modules(user_input))
+                self.assertIn(
+                    f"- {intent}：",
+                    build_contextual_runtime_intent_router_rules(user_input),
+                )
+
+    def test_recovered_intents_are_present_in_their_runtime_modules(self):
+        cases = (
+            ("會員怎麼註冊？", "member_registration_guidance", "帳務、復線與工具"),
+            ("電視沒節目", "tv_no_program_clarify", "故障、報修與真人"),
+            ("電視沒有台", "tv_no_program_clarify", "故障、報修與真人"),
+            ("畫面顯示沒有節目", "tv_no_program_display_issue", "故障、報修與真人"),
+            ("換路由器後無法上網", "router_replacement_registration_issue", "網路與設備"),
+        )
+        for user_input, intent, section in cases:
+            with self.subTest(user_input=user_input):
+                self.assertIn(intent, RUNTIME_INTENT_INDEX)
+                prompt = build_contextual_runtime_intent_router_rules(user_input)
+                self.assertIn(f"- {intent}：", prompt)
+                self.assertIn(f"【{section}】", prompt)
+
+    def test_short_followup_uses_user_context_not_assistant_reply_topics(self):
+        history = [
+            {"role": "user", "content": "自動扣款"},
+            {"role": "assistant", "content": "您可以退租或移機。"},
+        ]
+        selected = select_runtime_prompt_modules("了解", history=history)
+        self.assertIn("billing", selected)
+        self.assertNotIn("termination", selected)
 
     def test_contextual_prompt_reduces_common_turn_size(self):
         full_size = len(build_runtime_intent_router_rules())
@@ -166,6 +320,28 @@ class PromptUsageOptimizationTest(unittest.TestCase):
             "support.remote_control_price",
             select_runtime_policy_keys(("support", "services")),
         )
+
+    def test_remote_price_question_loads_intent_and_policy_facts(self):
+        modules = select_runtime_prompt_modules("遙控器多少錢")
+        self.assertIn("services", modules)
+        rules = build_contextual_runtime_intent_router_rules(
+            "遙控器多少錢", {"company_code": "cnt", "known_info": {}}, []
+        )
+        self.assertIn("remote_control_price_inquiry", rules)
+        policy = build_policy_prompt(
+            {"company_code": "cnt"}, select_runtime_policy_keys(modules)
+        )
+        self.assertIn("一般型遙控器 300 元", policy)
+        self.assertIn("語音遙控器 400 元", policy)
+
+    def test_combined_tv_network_monthly_fee_loads_scope_clarification(self):
+        text = "第四台再加 Wi-Fi 網路月費要多少？"
+        modules = select_runtime_prompt_modules(text)
+        self.assertIn("promotion", modules)
+        rules = build_contextual_runtime_intent_router_rules(
+            text, {"company_code": "tdtv", "known_info": {}}, []
+        )
+        self.assertIn("existing_vs_new_tv_network_clarify", rules)
 
     def test_runtime_contract_covers_all_fifteen_active_feedback_cases(self):
         runtime = build_runtime_intent_router_rules()

@@ -309,7 +309,7 @@
       </article>
       <article class="summary">
         <strong>恢復服務</strong>
-        <span>以超商收據三段條碼確認繳費後，才處理復線。</span>
+        <span>未繳費可申請復線；已繳費先上傳超商收據核銷。</span>
       </article>
     </section>
 
@@ -321,8 +321,8 @@
           <div>
             <span class="label">查詢前必須具備</span>
             <ul>
-              <li>客戶編號。</li>
-              <li>或戶名加上帳務系統登記的聯絡電話。</li>
+              <li>訪客提供客戶編號、戶名、登記電話任兩項。</li>
+              <li>已登入會員可使用 API 帶入的受信任客編。</li>
             </ul>
           </div>
           <div>
@@ -372,16 +372,16 @@
     </section>
 
     <section class="section">
-      <div class="section-heading"><span class="section-number">4</span><h2>已繳費後要求恢復服務</h2></div>
+      <div class="section-heading"><span class="section-number">4</span><h2>網路或電視復線</h2></div>
       <div class="panel">
-        <p class="lead">這與「帳單仍顯示」不同。客戶若已繳費並要求恢復網路、恢復電視，或表示已繳費仍無法使用服務，系統會要求超商繳費收據進行確認。</p>
-        <div class="flow" aria-label="收據確認與復線流程">
-          <div class="flow-step"><b>1. 上傳收據</b><span>請客戶上傳超商繳費收據圖片。</span></div>
-          <div class="flow-step"><b>2. 辨識條碼</b><span>讀取第一段、第二段、第三段條碼。</span></div>
-          <div class="flow-step"><b>3. 確認繳費</b><span>以條碼向帳務系統確認繳費資料。</span></div>
-          <div class="flow-step"><b>4. 處理復線</b><span>完成後請客戶重啟數據機或機上盒確認服務。</span></div>
+        <p class="lead">先確認繳費狀態，再依客戶要恢復的服務選擇流程；未繳費不代表不能提出復線申請。</p>
+        <div class="flow" aria-label="復線分流流程">
+          <div class="flow-step"><b>1. 確認狀態</b><span>未說明是否已繳費時，先詢問繳費狀態。</span></div>
+          <div class="flow-step"><b>2. 未繳費</b><span>核對身分並向網路或電視復線 API 提出申請，以 API 回覆判定是否受理。</span></div>
+          <div class="flow-step"><b>3. 已繳費</b><span>請客戶上傳清楚完整的超商繳費收據圖片。</span></div>
+          <div class="flow-step"><b>4. 收據核銷</b><span>可信圖片 OCR 確認來源、已繳、代收項目與完整三段條碼後，再處理復線。</span></div>
         </div>
-        <div class="warning"><strong>目前已知限制：</strong>規則設定要求此情境優先切換到收據條碼流程；但對話已經停在網路排錯時，仍有一筆回歸案例被延續為排錯、未切換至收據流程。此行為尚待修正。</div>
+        <div class="warning"><strong>資料安全：</strong>不可接受客戶手動輸入三段條碼；沒有可信收據圖片不得呼叫收據核銷 API。這項限制不阻止未繳費申請復線。</div>
       </div>
     </section>
 
@@ -412,12 +412,12 @@
       <div class="panel">
         <ul class="checklist">
           <li>API 登入資料已帶入可用客戶識別時，可查詢本期待繳帳單。</li>
-          <li>無 API 登入客戶識別時，必須同時要求戶名與登記電話，不可要求客戶自行提供客編。</li>
+          <li>無 API 登入客戶識別時，訪客查本期帳單或申請未繳費復線須核對客戶編號、戶名、登記電話任兩項。</li>
           <li>查無未繳後，不可改查合約到期日或預估下期金額。</li>
           <li>過往繳費、入帳紀錄與帳單期間必須引導 APP 或官網。</li>
           <li>超商已繳但帳單仍存在時，不可保證已入帳。</li>
-          <li>已繳費且要求復線時，應要求收據三段條碼並走確認流程。</li>
-          <li>條碼不足時，應要求補齊，不能直接執行復線。</li>
+          <li>未繳費要求復線可進入身分核對；已繳費要求復線須先上傳完整超商收據。</li>
+          <li>收據圖片不完整時要求重新上傳；不可接受手動條碼，也不可誤擋未繳費復線。</li>
         </ul>
       </div>
     </section>

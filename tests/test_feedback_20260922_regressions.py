@@ -7,11 +7,18 @@ from langchain_core.runnables import RunnableLambda
 
 from app.handlers.chat_handler import (
     build_repeat_repair_escalation_router,
+    add_repair_form_to_handoff_offer,
     build_clarify_context,
+    build_plan_from_router,
+    build_memory_without_active_flow,
+    is_repair_form_available,
     detect_active_flow_switch,
+    focus_knowledge_process_docs,
+    compose_knowledge_reply,
+    build_promotion_catalog_reply,
     resolve_model_selected_context,
 )
-from app.services.intent_router import router_guard, run_intent_router
+from app.services.intent_router import build_memory_summary, router_guard, run_intent_router
 from app.services.troubleshooting_engine import apply_troubleshooting_engine
 
 
@@ -25,6 +32,473 @@ def troubleshooting_plan(intent: str) -> dict:
 
 
 class Feedback20260922RegressionTest(unittest.TestCase):
+    def test_generic_transfer_uses_approved_common_documents(self):
+        plan = build_plan_from_router(
+            {"route": "direct_reply", "intent": "service_account_transfer", "reply": ""}
+        )
+        self.assertIn("原使用者與新使用者", plan["reply"])
+        self.assertIn("第二證件", plan["reply"])
+        self.assertNotIn("資料未提供", plan["reply"])
+
+    def test_generic_transfer_knowledge_route_normalizes_to_approved_contract(self):
+        decision = router_guard(
+            "了解過戶流程",
+            {"known_info": {}},
+            {"route": "knowledge_query", "intent": "service_account_transfer", "should_retrieve_knowledge": True},
+        )
+        self.assertEqual(decision["route"], "direct_reply")
+        self.assertIn("第二證件", decision["reply"])
+
+    def test_active_fault_does_not_restart_generic_repair_intake(self):
+        memory = {"known_info": {"troubleshooting_started": "yes", "troubleshooting_type": "remote"}}
+        with patch(
+            "app.handlers.chat_handler.run_intent_router",
+            return_value={
+                "route": "troubleshooting",
+                "intent": "repair_troubleshooting_intake",
+                "should_cancel_current_flow": True,
+            },
+        ):
+            decision = detect_active_flow_switch("登記維修", memory, [], None, {})
+        self.assertIsNone(decision)
+        self.assertEqual(memory["known_info"]["troubleshooting_started"], "yes")
+
+    def test_repair_equipment_clarification_preserves_reported_fault(self):
+        for clarify_intent in ("repair_troubleshooting_intake", "service_signal_type_clarify"):
+            with self.subTest(clarify_intent=clarify_intent):
+                context = build_clarify_context(
+                    {
+                        "route": "clarify",
+                        "intent": clarify_intent,
+                        "topic": "故障設備確認",
+                        "reply": "請問是哪一項設備無亮燈？",
+                    },
+                    original_query="都有插電，但是無亮燈",
+                )
+                memory = {
+                    "clarify_context": context,
+                    "known_info": {"power_status": "off", "issue_description": "設備已插電但無亮燈"},
+                }
+                selected, validated = resolve_model_selected_context(
+                    memory,
+                    {
+                        "route": "continue_current_flow",
+                        "intent": "troubleshooting",
+                        "selected_option_id": "repair_equipment_set_top_box",
+                    },
+                )
+
+                self.assertTrue(validated)
+                self.assertEqual(selected["route"], "troubleshooting")
+                result = apply_troubleshooting_engine(
+                    "機上盒", memory, troubleshooting_plan(selected["intent"])
+                )
+                self.assertIn("已插電但沒有亮燈", result["reply"])
+                self.assertEqual(memory["known_info"]["troubleshooting_step"], "tv_check_power_cable")
+
+    def test_model_boot_loop_alias_uses_boot_sop(self):
+        for alias in (
+            "tv_stb_reboot_loop_troubleshooting",
+            "stb_reboot_loop_troubleshooting",
+        ):
+            with self.subTest(alias=alias):
+                decision = router_guard(
+                    "重複一直開機中",
+                    {"known_info": {}},
+                    {
+                        "route": "continue_current_flow",
+                        "intent": alias,
+                        "should_cancel_current_flow": False,
+                        "reason": "model_boot_loop",
+                    },
+                )
+
+                self.assertEqual(decision["intent"], "tv_set_top_box_boot_issue")
+                memory = {"known_info": {}}
+                result = apply_troubleshooting_engine(
+                    "機上盒重複一直開機中", memory, troubleshooting_plan(decision["intent"])
+                )
+                self.assertIn("重複開機", result["reply"])
+                self.assertEqual(memory["known_info"]["troubleshooting_step"], "tv_reboot")
+
+    def test_boot_screen_followup_checks_result_instead_of_repeating_reboot(self):
+        memory = {"known_info": {}}
+        apply_troubleshooting_engine(
+            "機上盒重複一直開機中",
+            memory,
+            troubleshooting_plan("tv_set_top_box_boot_issue"),
+        )
+        result = apply_troubleshooting_engine(
+            "開機中請稍後的畫面",
+            memory,
+            troubleshooting_plan("tv_set_top_box_boot_issue"),
+            llm=RunnableLambda(lambda _: AIMessage(content='{"label":"unknown"}')),
+        )
+
+        self.assertIn("是否已", result["reply"])
+        self.assertNotIn("請先將機上盒電源拔掉", result["reply"])
+        self.assertEqual(memory["known_info"]["troubleshooting_step"], "tv_reboot")
+
+    def test_troubleshooting_does_not_promise_ticket_creation(self):
+        for user_text, intent in (
+            ("機上盒排除", "repair_troubleshooting_intake"),
+            ("網路故障", "internet_connection_issue"),
+        ):
+            with self.subTest(intent=intent):
+                result = apply_troubleshooting_engine(
+                    user_text, {"known_info": {}}, troubleshooting_plan(intent)
+                )
+                self.assertNotIn("建立報修工單", result["reply"])
+                self.assertNotIn("維修申告", result["reply"])
+
+    def test_speed_test_guidance_does_not_clear_active_speed_fault(self):
+        memory = {
+            "known_info": {
+                "troubleshooting_started": "yes",
+                "troubleshooting_type": "network",
+                "troubleshooting_step": "net_speed_retest",
+                "declared_plan_speed_mbps": 300.0,
+                "download_speed": 30.0,
+            },
+        }
+        with patch(
+            "app.handlers.chat_handler.run_intent_router",
+            return_value={
+                "route": "direct_reply",
+                "intent": "network_speed_test_guidance",
+                "should_cancel_current_flow": False,
+                "reason": "model_speed_test_guidance_contract",
+            },
+        ):
+            result = detect_active_flow_switch(
+                "測速只有30M", memory, [], RunnableLambda(lambda _: AIMessage(content="{}")), {}
+            )
+
+        self.assertEqual(result["route"], "continue_current_flow")
+        self.assertFalse(result["should_cancel_current_flow"])
+        self.assertEqual(memory["known_info"]["declared_plan_speed_mbps"], 300.0)
+
+    def test_handoff_acceptance_keeps_repair_escalation_state(self):
+        memory = {
+            "company_code": "tdtv",
+            "clarify_context": {"type": "human_handoff_offer"},
+            "known_info": {
+                "troubleshooting_type": "network",
+                "troubleshooting_failed": "yes",
+                "repair_ready": "yes",
+                "declared_plan_speed_mbps": 300.0,
+                "download_speed": 30.0,
+            },
+        }
+        with patch(
+            "app.handlers.chat_handler.run_intent_router",
+            return_value={
+                "route": "direct_reply",
+                "intent": "human_handoff_request",
+                "should_cancel_current_flow": False,
+                "reason": "model_accepted_handoff",
+            },
+        ):
+            result = detect_active_flow_switch(
+                "對", memory, [], RunnableLambda(lambda _: AIMessage(content="{}")), {}
+            )
+
+        self.assertFalse(result["should_cancel_current_flow"])
+        memory["known_info"]["human_handoff_active"] = "yes"
+        repeated = build_repeat_repair_escalation_router(memory)
+        self.assertEqual(repeated["intent"], "human_handoff_request")
+        self.assertNotIn("測速", repeated["reply"])
+
+    def test_account_transfer_service_selection_keeps_transfer_context(self):
+        context = build_clarify_context(
+            {"intent": "service_account_transfer_service_clarify", "topic": "更名服務類型"},
+            original_query="更換戶名",
+        )
+        memory = {"clarify_context": context, "known_info": {}}
+        selected, validated = resolve_model_selected_context(
+            memory,
+            {"route": "continue_current_flow", "intent": "service_account_transfer", "selected_option_id": "account_transfer_cable_tv"},
+        )
+
+        self.assertTrue(validated)
+        self.assertEqual(selected["route"], "knowledge_query")
+        self.assertIn("更名過戶", selected["knowledge_query"])
+        self.assertNotIn("收視費", selected["knowledge_query"])
+        self.assertIn("身分證正本", selected["reply"])
+
+    def test_account_transfer_document_question_can_leave_optional_service_menu(self):
+        context = build_clarify_context(
+            {"intent": "service_account_transfer_service_clarify", "topic": "更名服務類型"},
+            original_query="過戶",
+        )
+        memory = {"clarify_context": context, "known_info": {}}
+        decision, validated = resolve_model_selected_context(
+            memory,
+            {
+                "route": "direct_reply",
+                "intent": "account_holder_change_required_documents",
+                "should_cancel_current_flow": False,
+                "reply": "辦理更名過戶所需的共通證件",
+            },
+        )
+        self.assertFalse(validated)
+        self.assertIsNone(memory["clarify_context"])
+        self.assertEqual(decision["intent"], "account_holder_change_required_documents")
+
+    def test_repair_form_is_distinct_from_human_handoff_offer(self):
+        plan = build_plan_from_router({
+            "route": "direct_reply",
+            "intent": "repair_form_guidance",
+            "reply": "",
+        })
+        self.assertIn("維修申告", plan["reply"])
+        self.assertNotIn("請問是否需要", plan["reply"])
+        self.assertNotIn("前述排錯仍未恢復", plan["reply"])
+
+        memory = {"company_code": "tdtv", "known_info": {
+            "troubleshooting_type": "remote",
+            "troubleshooting_failed": "yes",
+            "repair_ready": "yes",
+        }}
+        with patch("app.handlers.chat_handler.run_intent_router", return_value={
+            "route": "direct_reply",
+            "intent": "repair_form_guidance",
+            "should_cancel_current_flow": False,
+            "reply": "請填寫維修申告表單",
+        }):
+            decision = detect_active_flow_switch(
+                "登記維修", memory, [], RunnableLambda(lambda _: AIMessage(content="{}")), {}
+            )
+        self.assertEqual(decision["intent"], "repair_form_guidance")
+        self.assertFalse(decision["should_cancel_current_flow"])
+
+    def test_customer_can_choose_repair_form_after_first_guided_step(self):
+        memory = {"company_code": "tdtv", "known_info": {
+            "troubleshooting_started": "yes",
+            "troubleshooting_type": "remote",
+            "troubleshooting_step": "remote_check_light",
+            "troubleshooting_failed": "no",
+            "repair_ready": "no",
+        }}
+        self.assertTrue(is_repair_form_available(memory))
+        self.assertFalse(is_repair_form_available({"known_info": {}}))
+        self.assertFalse(is_repair_form_available({"known_info": {
+            "troubleshooting_started": "yes",
+            "troubleshooting_type": "unknown",
+            "troubleshooting_step": "ask_fault_category",
+        }}))
+        with patch("app.handlers.chat_handler.run_intent_router", return_value={
+            "route": "direct_reply",
+            "intent": "repair_form_guidance",
+            "should_cancel_current_flow": True,
+            "reply": "請填寫維修申告表單",
+        }):
+            decision = detect_active_flow_switch("登記維修", memory, [], None, {})
+        self.assertEqual(decision["intent"], "repair_form_guidance")
+        self.assertFalse(decision["should_cancel_current_flow"])
+
+        candidate = build_memory_without_active_flow(memory)
+        self.assertEqual(candidate["known_info"]["troubleshooting_started"], "no")
+        self.assertIn('"repair_form_available":"yes"', build_memory_summary(candidate))
+
+    def test_same_fault_after_form_offer_does_not_restart_troubleshooting(self):
+        memory = {"company_code": "tdtv", "known_info": {
+            "troubleshooting_started": "yes",
+            "troubleshooting_type": "remote",
+            "troubleshooting_step": "remote_check_light",
+            "repair_form_offered": "yes",
+        }}
+        with patch("app.handlers.chat_handler.run_intent_router", return_value={
+            "route": "continue_current_flow",
+            "intent": "remote_control_issue",
+            "should_cancel_current_flow": False,
+        }):
+            decision = detect_active_flow_switch("有亮但仍不能選台", memory, [], None, {})
+        self.assertEqual(decision["route"], "direct_reply")
+        self.assertEqual(decision["intent"], "repair_form_guidance")
+
+    def test_combined_fee_scope_requires_validated_choice(self):
+        context = build_clarify_context(
+            {
+                "intent": "existing_vs_new_tv_network_clarify",
+                "topic": "電視加網路月費",
+                "reply": "請問是現有電視加辦網路，還是新申裝兩項服務？",
+            },
+            original_query="第四台再加Wi-Fi網路月費要多少",
+        )
+        memory = {"clarify_context": context, "known_info": {}}
+        undecided, validated = resolve_model_selected_context(
+            memory,
+            {
+                "route": "knowledge_query",
+                "intent": "pure_network_install_plan_query",
+                "should_cancel_current_flow": False,
+            },
+        )
+        self.assertFalse(validated)
+        self.assertEqual(undecided["route"], "clarify")
+        self.assertIn("現有電視加辦網路", undecided["reply"])
+
+        selected, validated = resolve_model_selected_context(
+            memory,
+            {
+                "route": "knowledge_query",
+                "intent": "other",
+                "selected_option_id": "tv_network_new_install",
+            },
+        )
+        self.assertTrue(validated)
+        self.assertEqual(selected["promotion_scope"], "tv_network")
+        self.assertEqual(selected["intent"], "tv_network_install_plan_query")
+
+        existing, validated = resolve_model_selected_context(
+            memory,
+            {
+                "route": "knowledge_query",
+                "intent": "other",
+                "selected_option_id": "tv_existing_add_broadband",
+            },
+        )
+        self.assertTrue(validated)
+        self.assertEqual(existing["promotion_scope"], "tv_network")
+        self.assertEqual(existing["promotion_query_kind"], "catalog")
+        self.assertEqual(existing["intent"], "existing_tv_add_broadband_fee_query")
+        self.assertIn("資格", existing["requested_information"])
+
+    def test_existing_tv_add_broadband_catalog_is_reference_not_account_quote(self):
+        docs = [{
+            "campaign_name": "測試同裝方案",
+            "document_type": "promotion_campaign",
+            "record_type": "campaign_rate",
+            "service_types": "電視網路同裝",
+            "answer": "100M/10M：月繳 890 元",
+        }]
+        scoped = focus_knowledge_process_docs(
+            docs,
+            "existing_tv_add_broadband_fee_query",
+            promotion_query_kind="catalog",
+        )
+        reply = build_promotion_catalog_reply(
+            "加上Wi-Fi網路月費",
+            scoped,
+            intent="existing_tv_add_broadband_fee_query",
+            promotion_scope="tv_network",
+            promotion_query_kind="catalog",
+        )
+        self.assertIn("測試同裝方案", reply)
+        self.assertIn("890 元", reply)
+        self.assertIn("現有合約", reply)
+        self.assertIn("適用資格", reply)
+
+    def test_catalog_requery_is_not_forced_to_select_a_named_campaign(self):
+        memory = {
+            "clarify_context": {
+                "type": "campaign_catalog_selection",
+                "topic": "優惠方案清單",
+                "options": {"方案甲": {
+                    "option_id": "option_1",
+                    "intent": "promotion_named_campaign_selection",
+                    "route": "knowledge_query",
+                }},
+            }
+        }
+        router = {
+            "route": "knowledge_query",
+            "intent": "tv_network_install_plan_query",
+            "promotion_scope": "tv_network",
+            "promotion_query_kind": "catalog",
+            "should_cancel_current_flow": False,
+        }
+        decision, validated = resolve_model_selected_context(memory, router)
+        self.assertFalse(validated)
+        self.assertEqual(decision["route"], "knowledge_query")
+        self.assertIsNone(memory["clarify_context"])
+
+    def test_transfer_without_matching_documents_uses_approved_contract(self):
+        reply = compose_knowledge_reply(
+            "更換戶名", "", [], intent="account_transfer_process",
+            fallback_reply="辦理變更使用者，請由雙方攜帶核准證件至門市。",
+        )
+        self.assertIn("雙方", reply)
+        self.assertNotIn("沒有查到足夠明確", reply)
+
+    def test_transfer_documents_exclude_unrelated_social_documents(self):
+        docs = [
+            {"question": "低收入戶申請應備證件", "answer": "身心障礙優惠文件"},
+            {"question": "更名過戶應備證件", "answer": "變更使用者須由原用戶與新用戶準備證件"},
+        ]
+        scoped = focus_knowledge_process_docs(docs, "service_transfer_document_requirements")
+        self.assertEqual([doc["question"] for doc in scoped], ["更名過戶應備證件"])
+
+    def test_existing_tv_add_broadband_rejects_wifi_device_fees(self):
+        docs = [
+            {"question": "Wi-Fi 分享器加購月費", "answer": "分享器月費 25 元"},
+            {"question": "有線電視基本收視費", "answer": "電視月費 550 元"},
+            {"question": "既有電視用戶加辦寬頻", "answer": "現有有線電視用戶加辦寬頻須確認合約與方案"},
+        ]
+        scoped = focus_knowledge_process_docs(docs, "existing_tv_add_broadband_fee_query")
+        self.assertEqual([doc["question"] for doc in scoped], ["既有電視用戶加辦寬頻"])
+
+        fallback = compose_knowledge_reply(
+            "加上Wi-Fi網路月費", "", [], intent="existing_tv_add_broadband_fee_query"
+        )
+        self.assertIn("現有合約", fallback)
+        self.assertNotIn("分享器", fallback)
+
+    def test_repair_escalation_survives_set_top_box_network_detail(self):
+        memory = {"company_code": "tdtv", "known_info": {
+            "troubleshooting_started": "no",
+            "troubleshooting_type": "tv",
+            "troubleshooting_failed": "yes",
+            "repair_ready": "yes",
+            "issue_description": "哈TV機上盒仍無法連網",
+        }}
+        with patch("app.handlers.chat_handler.run_intent_router", return_value={
+            "route": "troubleshooting",
+            "intent": "tv_set_top_box_network_connection_issue",
+            "service_scope": "哈TV機上盒聯網",
+            "should_cancel_current_flow": False,
+        }):
+            result = detect_active_flow_switch(
+                "網路正常，是哈TV機上盒無法連網",
+                memory,
+                [],
+                RunnableLambda(lambda _: AIMessage(content="{}")),
+                {},
+            )
+        self.assertEqual(result["intent"], "human_handoff_offer")
+        self.assertIn("申告維修", result["reply"])
+
+    def test_handoff_offer_keeps_active_fault_context_and_form(self):
+        memory = {"company_code": "tdtv", "known_info": {
+            "troubleshooting_started": "yes",
+            "troubleshooting_type": "remote",
+            "troubleshooting_step": "remote_check_receiver",
+            "issue_description": "遙控器有亮但不能選台",
+        }}
+        with patch("app.handlers.chat_handler.run_intent_router", return_value={
+            "route": "clarify",
+            "intent": "human_handoff_offer",
+            "reply": "請問是否需要幫您轉接真人文字客服？",
+            "should_cancel_current_flow": False,
+        }):
+            result = detect_active_flow_switch(
+                "有試過了，沒用", memory, [],
+                RunnableLambda(lambda _: AIMessage(content="{}")), {},
+            )
+        self.assertFalse(result["should_cancel_current_flow"])
+        reply = add_repair_form_to_handoff_offer(result["reply"], memory)
+        self.assertIn("維修申告", reply)
+        self.assertIn("尚未代您登記", reply)
+
+    def test_remote_first_reply_does_not_claim_diagnosis(self):
+        memory = {"known_info": {}}
+        result = apply_troubleshooting_engine(
+            "遙控器不能使用", memory, troubleshooting_plan("remote_control_issue")
+        )
+        self.assertNotIn("比較像是遙控器控制異常", result["reply"])
+        self.assertIn("更換新電池", result["reply"])
+
     def test_bare_repair_request_is_forced_to_troubleshooting_first(self):
         decision = router_guard(
             user_input="我要登記維修",
@@ -608,10 +1082,21 @@ class Feedback20260922RegressionTest(unittest.TestCase):
             troubleshooting_plan("tv_set_top_box_network_connection_issue"),
             llm=llm,
         )
+        third = apply_troubleshooting_engine(
+            "排錯流程是什麼",
+            memory,
+            troubleshooting_plan("tv_set_top_box_network_connection_issue"),
+            llm=llm,
+        )
 
         self.assertFalse(first["should_call_tool"])
         self.assertFalse(second["should_call_tool"])
         self.assertNotEqual(memory["known_info"].get("repair_ready"), "yes")
+        self.assertNotEqual(first["reply"], second["reply"])
+        self.assertNotEqual(second["reply"], third["reply"])
+        self.assertIn("完成", second["reply"])
+        self.assertIn("1.", third["reply"])
+        self.assertNotIn("一般寬頻斷線流程", first["reply"])
 
     def test_punctuation_only_followup_keeps_active_troubleshooting_flow(self):
         memory = {
@@ -731,12 +1216,35 @@ class Feedback20260922RegressionTest(unittest.TestCase):
                 "電腦網卡更換註冊",
                 "轉接真人文字客服",
             ),
+            (
+                "tv_safe_mode_guidance",
+                "電視機本身的系統狀態",
+                "電視電源拔除約 1 分鐘",
+            ),
+            (
+                "pppoe_connection_type_guidance",
+                "不需要 PPPoE 帳號或密碼",
+                "DHCP／自動取得 IP",
+            ),
+            (
+                "basic_vs_digital_channels_comparison",
+                "基本收視頻道",
+                "另行付費加購",
+            ),
+            (
+                "service_suspension_process",
+                "臨櫃辦理",
+                "復機費每戶 200 元",
+            ),
         )
 
         for intent, expected, extra in cases:
             with self.subTest(intent=intent):
                 decision = router_guard(
-                    user_input="測試問題",
+                    user_input=(
+                        "電視畫面顯示安全模式"
+                        if intent == "tv_safe_mode_guidance" else "測試問題"
+                    ),
                     memory={"known_info": {}},
                     router={
                         "route": "direct_reply",

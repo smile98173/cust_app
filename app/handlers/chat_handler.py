@@ -10,6 +10,7 @@ from uuid import uuid4
 from langchain_core.prompts import ChatPromptTemplate
 
 from app.services.intent_router import (
+    ACCOUNT_HOLDER_CHANGE_DOCUMENTS_REPLY,
     APP_PAYMENT_RECEIPT_REPLY,
     BASIC_CHANNEL_TABLE_REPLY,
     CABLE_TV_TERMINATION_CALCULATION_REPLY,
@@ -29,6 +30,7 @@ from app.services.intent_router import (
     WEB_HUMAN_HANDOFF_REPLY,
     TV_PASSWORD_PROMPT_REPLY,
     TV_UNAUTHORIZED_PAID_CHANNEL_REPLY,
+    TV_SAFE_MODE_REPLY,
     SERVICE_ACCOUNT_TRANSFER_REPLY,
     VIRTUAL_HOSTING_UNSUPPORTED_REPLY,
     detect_contextual_feedback_direct_reply,
@@ -50,6 +52,7 @@ from app.services.router_catalog import (
     match_clarify_option,
 )
 from app.services.kb_answer_guard import filter_answerable_docs, is_promotion_query
+from app.services.regional_policy import get_policy_text
 from app.services.general_knowledge_fallback import build_general_knowledge_reply
 from app.services.kb_service import (
     VALUE_ADDED_PRODUCT_QUERY_ALIASES,
@@ -83,6 +86,7 @@ from app.services.customer_validation import (
 from app.services.slot_manager import (
     extract_slots_from_text,
     has_invalid_customer_number_format,
+    is_valid_person_name,
     merge_slots_into_memory,
     get_missing_tool_args,
     build_missing_args_question,
@@ -494,10 +498,70 @@ RAG 資料：
 
 
 COMPLETE_KNOWLEDGE_EVIDENCE_INTENTS = {
+    "auto_payment_guidance",
     "cable_tv_payment_cycle_comparison",
+    "invoice_win_notification",
     "relocation_guidance",
     "remote_power_learning",
+    "youtube_on_tv_guidance",
 }
+
+FOCUSED_KNOWLEDGE_QUESTIONS = {
+    "auto_payment_guidance": {"循環扣款", "綁定信用卡"},
+    "invoice_win_notification": {"中獎發票一定要到櫃檯領取嗎?", "請問中獎發票要如何領取"},
+    "remote_power_learning": {"複製遙控器的功能如何操作"},
+    "youtube_on_tv_guidance": {"免費觀看YouTube", "聯網機上盒功能/雙模機功能"},
+}
+
+POLICY_EVIDENCE_INTENTS = {
+    "remote_control_price_inquiry": ("support.remote_control_price", "遙控器價格"),
+    "remote_control_price": ("support.remote_control_price", "遙控器價格"),
+}
+
+
+def policy_evidence_for_intent(
+    memory: Dict[str, Any], intent: str | None
+) -> List[Dict[str, Any]]:
+    policy = POLICY_EVIDENCE_INTENTS.get(str(intent or ""))
+    if not policy:
+        return []
+    rule_key, question = policy
+    answer = get_policy_text(memory, rule_key, "reply")
+    return [{"question": question, "answer": answer}] if answer else []
+
+
+def focus_knowledge_process_docs(
+    docs: List[Dict[str, Any]], intent: str | None,
+    promotion_query_kind: str | None = None,
+) -> List[Dict[str, Any]]:
+    if intent == "existing_tv_add_broadband_fee_query":
+        if promotion_query_kind == "catalog":
+            return docs
+        return [
+            doc for doc in docs
+            if (
+                any(term in str(doc.get("question") or doc.get("title") or "") for term in ("有線電視", "第四台", "電視"))
+                and any(term in str(doc.get("question") or doc.get("title") or "") for term in ("寬頻", "網路"))
+                and any(term in " ".join(str(doc.get(key) or "") for key in ("question", "title", "answer")) for term in ("加辦", "既有", "現有", "原用戶"))
+            )
+        ]
+    if intent in {
+        "account_transfer_process",
+        "service_transfer_document_requirements",
+    }:
+        transfer_terms = ("過戶", "更名", "變更使用者", "變更戶名", "變更申請人")
+        return [
+            doc for doc in docs
+            if any(
+                term in " ".join(str(doc.get(key) or "") for key in ("question", "title", "answer"))
+                for term in transfer_terms
+            )
+        ]
+    questions = FOCUSED_KNOWLEDGE_QUESTIONS.get(intent)
+    if not questions:
+        return docs
+    focused = [doc for doc in docs if str(doc.get("question") or "").strip() in questions]
+    return focused or docs
 
 
 def carry_forward_same_intent_evidence(
@@ -520,10 +584,43 @@ def carry_forward_same_intent_evidence(
     return dedupe_retrieved_docs([*previous_docs, *docs])
 
 
+def carry_forward_knowledge_intent(
+    router: Dict[str, Any], memory: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Retain the last grounded topic only when the model chose continuation."""
+    if (
+        router.get("route") != "continue_current_flow"
+        or router.get("intent") != "other"
+        or router.get("should_cancel_current_flow")
+    ):
+        return router
+    previous_intent = str(memory.get("last_knowledge_intent") or "")
+    if not previous_intent or previous_intent == "other":
+        return router
+    continued = dict(router)
+    continued.update({
+        "intent": previous_intent,
+        "should_retrieve_knowledge": True,
+        "knowledge_query": (
+            router.get("knowledge_query") or memory.get("last_knowledge_query")
+        ),
+        "reason": "state_knowledge_continuation",
+    })
+    return continued
+
+
 def knowledge_response_focus(intent: str | None) -> str:
+    if intent == "auto_payment_guidance":
+        return (
+            "說明授權信用卡或銀行帳戶在帳單產生後定期扣款，"
+            "再依資料說明官網會員專區綁定信用卡；"
+            "銀行帳戶僅列為扣款方式，不主動說明申辦或轉真人；"
+            "不可列出一次性繳費的所有管道。"
+        )
     if intent == "relocation_guidance":
         return (
-            "只整理移機流程、移機本身的費用與必要條件；資料有明確金額時，"
+            "只整理移機流程、移機本身的費用與必要條件；流程需說明先確認新址線路、"
+            "登記移機並安排施工，施工費原則上完工後收取；資料有明確金額時，"
             "必須逐項列出所有室內／室外及各服務費用，不帶入優惠活動、其他方案、"
             "分機、機上盒費用、客服電話或服務地區。"
         )
@@ -532,7 +629,17 @@ def knowledge_response_focus(intent: str | None) -> str:
             "只列有線電視各繳別金額與同期間差額；不可加入服務地區、公司介紹或其他方案。"
         )
     if intent == "remote_power_learning":
-        return "只回答遙控器拷貝／學習的操作步驟、按鍵順序與燈號。"
+        return (
+            "只回答文件載明的遙控器拷貝／學習按鍵順序與燈號；"
+            "文件若只列電源鍵，不可推測音量鍵或退出模式的操作。"
+        )
+    if intent == "invoice_win_notification":
+        return "只回答中獎發票如何通知、領取期限與逾期寄送；不可回答開立時程或歸戶流程。"
+    if intent == "youtube_on_tv_guidance":
+        return (
+            "說明 YouTube 非另售加值訂閱、聯網機上盒可免費使用；"
+            "是否能換裝及費用需依現有設備與方案確認，勿要求先登入查個人加值服務。"
+        )
     if intent == "fixed_ip_binding_guidance":
         return (
             "只回答固定 IP 的申請確認與綁定流程。先說明數量及當期費用須由客服依現行規則確認，"
@@ -1683,6 +1790,8 @@ def build_promotion_catalog_reply(
     else:
         heading = "目前可參考的優惠方案："
     reply = heading + "\n\n" + "\n\n".join(rows)
+    if intent == "existing_tv_add_broadband_fee_query":
+        reply += "\n\n以上為公開同裝方案參考；現有合約的適用資格及實際月費仍需依帳戶確認。"
     if requested_speeds:
         if combo_catalog:
             reply += "\n\n以上為電視＋網路同裝方案，所列費用包含有線電視與寬頻網路服務。"
@@ -2371,9 +2480,15 @@ def extract_knowledge_primary_terms(user_text: str) -> set[str]:
     return {term for term in terms if len(term) >= 2}
 
 
-def has_knowledge_reply_evidence(user_text: str, reply: str) -> bool:
+def has_knowledge_reply_evidence(
+    user_text: str, reply: str, *, intent: str | None = None
+) -> bool:
     normalized_reply = compact_text(reply).casefold()
     evidence_terms = extract_knowledge_evidence_terms(user_text)
+    if intent == "relocation_guidance" and any(
+        term in normalized_reply for term in ("移機", "搬家")
+    ):
+        return True
     return bool(normalized_reply and evidence_terms and any(
         term in normalized_reply for term in evidence_terms
     ))
@@ -2649,7 +2764,7 @@ def add_repair_form_to_handoff_offer(reply: str, memory: Dict[str, Any]) -> str:
     if not repair_link:
         return value
 
-    form_line = f"您也可以填寫 {repair_link} 送出維修需求。"
+    form_line = f"如需申告維修，請由您填寫 {repair_link} 送出需求；目前尚未代您登記。"
     question_marker = "請問是否需要"
     question_index = value.find(question_marker)
     if question_index >= 0:
@@ -2675,8 +2790,32 @@ def is_repair_escalation_active(memory: Dict[str, Any]) -> bool:
     )
 
 
+def is_repair_form_available(memory: Dict[str, Any]) -> bool:
+    known = (memory or {}).get("known_info") or {}
+    return known.get("repair_form_offered") == "yes" or is_repair_escalation_active(memory) or (
+        known.get("troubleshooting_started") == "yes"
+        and known.get("troubleshooting_type") in {"network", "remote", "set_top_box_network", "tv"}
+        and bool(known.get("troubleshooting_step"))
+        and known.get("troubleshooting_step") != "ask_fault_category"
+    )
+
+
 def build_repeat_repair_escalation_router(memory: Dict[str, Any]) -> Dict[str, Any]:
     """Keep a repeated fault in the already-offered escalation stage."""
+    if ((memory or {}).get("known_info") or {}).get("human_handoff_active") == "yes":
+        return {
+            "route": "direct_reply",
+            "intent": "human_handoff_request",
+            "tool_name": None,
+            "topic": "故障後續處理",
+            "should_cancel_current_flow": False,
+            "should_call_tool": False,
+            "should_retrieve_knowledge": False,
+            "knowledge_query": None,
+            "reply": WEB_HUMAN_HANDOFF_REPLY,
+            "extracted_slots": {},
+            "reason": "repair_handoff_already_accepted_same_issue",
+        }
     profile = get_company_profile((memory or {}).get("company_code", DEFAULT_TV_CABLE))
     repair_link = build_company_link(profile, "維修申告")
     if repair_link:
@@ -3705,6 +3844,16 @@ def compose_knowledge_reply(
         return fixed_ip_reply
 
     if not answerable_docs:
+        if intent == "existing_tv_add_broadband_fee_query":
+            return (
+                "現有有線電視加辦寬頻的月費，需依現有合約與當期可申辦方案確認；"
+                "目前沒有足夠的正式資料可直接報價，請由客服協助核對適用方案。"
+            )
+        if intent in {"account_transfer_process", "service_transfer_document_requirements"}:
+            return fallback_reply or (
+                "目前無法從正式資料確認更名過戶的辦理細節與應備文件，"
+                "請由客服依服務類型及帳戶狀態協助確認。"
+            )
         general_reply = build_general_knowledge_reply(user_text, llm, memory=memory)
         if general_reply:
             return general_reply
@@ -3891,14 +4040,19 @@ def compose_knowledge_reply(
                 summary,
                 answerable_docs,
             )
-        if summary and not missing_requirements and has_knowledge_reply_evidence(user_text, summary):
+        if summary and not missing_requirements and has_knowledge_reply_evidence(
+            user_text, summary, intent=intent
+        ):
             return apply_customer_reply_policies(
                 user_text,
                 summary,
                 answerable_docs,
                 memory=memory,
             )
-        payment_cycle_fallback = build_payment_cycle_evidence_fallback(answerable_docs)
+        payment_cycle_fallback = (
+            build_payment_cycle_evidence_fallback(answerable_docs)
+            if intent == "cable_tv_payment_cycle_comparison" else ""
+        )
         if payment_cycle_fallback:
             return apply_customer_reply_policies(
                 user_text,
@@ -4633,6 +4787,7 @@ def clear_current_flow(memory: Dict[str, Any]) -> Dict[str, Any]:
         "modem_light_status",
         "repair_flow_status",
         "repair_followup_active",
+        "repair_form_offered",
         "termination_service_scope",
         "human_handoff_active",
         "human_handoff_topic",
@@ -4734,6 +4889,11 @@ def build_plan_from_router(router: Dict[str, Any]) -> Dict[str, Any]:
         reply = TV_UNAUTHORIZED_PAID_CHANNEL_REPLY
     elif intent == "service_account_transfer":
         reply = SERVICE_ACCOUNT_TRANSFER_REPLY
+    elif intent == "repair_form_guidance":
+        reply = (
+            "請填寫維修申告表單，由專人協助後續處理；"
+            "目前尚未代您登記。"
+        )
     elif intent == "repair_visit_expectation":
         reply = REPAIR_VISIT_EXPECTATION_REPLY
     elif intent == "installation_visit_expectation":
@@ -4787,6 +4947,93 @@ def build_troubleshooting_plan(memory: Dict[str, Any]) -> Dict[str, Any]:
 def build_clarify_context(router: Dict[str, Any], original_query: str = "") -> Dict[str, Any] | None:
     topic = router.get("topic")
     intent = router.get("intent")
+
+    if (
+        intent in {"repair_troubleshooting_intake", "service_signal_type_clarify"}
+        and router.get("route") == "clarify"
+    ):
+        return {
+            "type": "repair_equipment_selection",
+            "topic": "故障設備確認",
+            "original_query": original_query,
+            "prompt": router.get("reply") or "請問是哪一項設備需要排除？",
+            "options": {
+                "有線電視機上盒": {
+                    "option_id": "repair_equipment_set_top_box",
+                    "accepted_intents": ["tv_set_top_box_unresponsive_issue"],
+                    "route": "troubleshooting",
+                    "intent": "tv_set_top_box_unresponsive_issue",
+                    "topic": "機上盒故障排除",
+                },
+                "寬頻數據機或分享器": {
+                    "option_id": "repair_equipment_network",
+                    "accepted_intents": ["internet_connection_issue"],
+                    "route": "troubleshooting",
+                    "intent": "internet_connection_issue",
+                    "topic": "寬頻設備故障排除",
+                },
+                "不確定設備": {
+                    "option_id": "repair_equipment_unknown",
+                    "route": "clarify",
+                    "intent": "repair_troubleshooting_intake",
+                    "topic": "故障設備確認",
+                    "reply": "沒關係，請描述沒有亮燈的設備外觀或位置，我會協助辨認。",
+                },
+            },
+        }
+
+    if intent == "tv_no_program_clarify":
+        return {
+            "type": "tv_no_program_symptom",
+            "topic": "電視沒有節目症狀",
+            "original_query": original_query,
+            "prompt": "請問目前電視是哪一種情況？若有錯誤代碼，也可以直接告訴我。",
+            "options": {
+                "完全沒有畫面": {
+                    "option_id": "tv_no_program_no_picture",
+                    "accepted_intents": ["tv_viewing_interruption_issue"],
+                    "route": "troubleshooting",
+                    "intent": "tv_viewing_interruption_issue",
+                },
+                "只有部分頻道不能看": {
+                    "option_id": "tv_no_program_partial_channels",
+                    "accepted_intents": ["tv_partial_channel_issue"],
+                    "route": "troubleshooting",
+                    "intent": "tv_partial_channel_issue",
+                },
+                "畫面顯示沒有節目": {
+                    "option_id": "tv_no_program_display_message",
+                    "accepted_intents": ["tv_no_program_display_issue"],
+                    "route": "troubleshooting",
+                    "intent": "tv_no_program_display_issue",
+                },
+            },
+        }
+
+    if intent == "tv_safe_mode_device_clarify":
+        return {
+            "type": "tv_safe_mode_device",
+            "topic": "安全模式設備確認",
+            "original_query": original_query,
+            "options": {
+                "電視畫面": {
+                    "option_id": "safe_mode_tv_confirmed",
+                    "accepted_intents": ["tv_safe_mode_guidance"],
+                    "route": "direct_reply",
+                    "intent": "tv_safe_mode_guidance",
+                    "topic": "電視安全模式",
+                    "reply": TV_SAFE_MODE_REPLY,
+                },
+                "其他設備": {
+                    "option_id": "safe_mode_other_device",
+                    "accepted_intents": ["tv_safe_mode_other_device"],
+                    "route": "clarify",
+                    "intent": "tv_safe_mode_device_clarify",
+                    "topic": "安全模式設備確認",
+                    "reply": "請問是哪個設備顯示「安全模式」？",
+                },
+            },
+        }
 
     if intent == "human_handoff_offer":
         return {
@@ -4891,6 +5138,61 @@ def build_clarify_context(router: Dict[str, Any], original_query: str = "") -> D
             "type": "service_account_transfer_service_selection",
             "topic": "更名服務類型",
             "original_query": original_query,
+            "options": {
+                "有線電視": {
+                    "option_id": "account_transfer_cable_tv",
+                    "route": "knowledge_query",
+                    "intent": "account_transfer_process",
+                    "topic": "有線電視更名過戶",
+                    "knowledge_query": "有線電視 更名過戶 變更使用者 申請流程 應備文件",
+                    "reply": ACCOUNT_HOLDER_CHANGE_DOCUMENTS_REPLY,
+                },
+                "寬頻網路": {
+                    "option_id": "account_transfer_broadband",
+                    "route": "knowledge_query",
+                    "intent": "account_transfer_process",
+                    "topic": "寬頻網路更名過戶",
+                    "knowledge_query": "寬頻網路 更名過戶 變更使用者 申請流程 應備文件",
+                    "reply": ACCOUNT_HOLDER_CHANGE_DOCUMENTS_REPLY,
+                },
+                "兩項服務": {
+                    "option_id": "account_transfer_both",
+                    "route": "direct_reply",
+                    "intent": "service_account_transfer",
+                    "topic": "有線電視及寬頻更名過戶",
+                    "reply": SERVICE_ACCOUNT_TRANSFER_REPLY,
+                },
+            },
+        }
+
+    if intent == "existing_vs_new_tv_network_clarify":
+        return {
+            "type": "tv_network_fee_scope_selection",
+            "intent": intent,
+            "topic": topic or "電視加網路月費",
+            "original_query": original_query,
+            "prompt": router.get("reply") or "請問是現有電視加辦網路，還是新申裝兩項服務？",
+            "options": {
+                "現有電視加辦寬頻": {
+                    "option_id": "tv_existing_add_broadband",
+                    "route": "knowledge_query",
+                    "intent": "existing_tv_add_broadband_fee_query",
+                    "topic": "現有有線電視加辦寬頻",
+                    "knowledge_query": "有線電視與寬頻同裝 當期公開方案 月費 既有用戶資格",
+                    "requested_information": "公開同裝方案及月費參考；現有合約適用資格須核對",
+                    "promotion_scope": "tv_network",
+                    "promotion_query_kind": "catalog",
+                },
+                "新申裝電視與寬頻": {
+                    "option_id": "tv_network_new_install",
+                    "route": "knowledge_query",
+                    "intent": "tv_network_install_plan_query",
+                    "topic": "有線電視與寬頻同裝方案",
+                    "knowledge_query": "有線電視與寬頻同裝 當期方案 月費",
+                    "promotion_scope": "tv_network",
+                    "promotion_query_kind": "catalog",
+                },
+            },
         }
 
     if intent in {"general_channel_e004_temp_restore_clarify", "personal_monthly_fee_clarify"}:
@@ -5124,6 +5426,32 @@ def resolve_model_selected_context(
         return router, False
 
     selected_option_id = str(router.get("selected_option_id") or "").strip()
+    if (
+        context.get("type") == "service_account_transfer_service_selection"
+        and not selected_option_id
+        and router.get("route") in {"direct_reply", "knowledge_query"}
+        and router.get("intent") in {
+            "account_holder_change_required_documents",
+            "service_transfer_document_requirements",
+            "account_transfer_process",
+        }
+    ):
+        memory["clarify_context"] = None
+        return router, False
+    if (
+        context.get("type") == "campaign_catalog_selection"
+        and not selected_option_id
+        and router.get("route") == "knowledge_query"
+        and (
+            router.get("promotion_query_kind") == "catalog"
+            or router.get("intent") in {
+                "pure_network_install_plan_query",
+                "tv_network_install_plan_query",
+            }
+        )
+    ):
+        memory["clarify_context"] = None
+        return router, False
     if not selected_option_id:
         model_intent = str(router.get("intent") or "").strip()
         intent_matches = [
@@ -5134,6 +5462,21 @@ def resolve_model_selected_context(
             and model_intent in set(raw_option.get("accepted_intents") or [])
         ]
         if len(intent_matches) != 1:
+            if (
+                router.get("route") in {"knowledge_query", "continue_current_flow", "direct_reply"}
+                and not router.get("should_cancel_current_flow")
+            ):
+                pending = dict(router)
+                pending.update({
+                    "route": "clarify",
+                    "intent": context.get("intent") or "dynamic_option_selection_pending",
+                    "tool_name": None,
+                    "should_call_tool": False,
+                    "should_retrieve_knowledge": False,
+                    "reply": context.get("prompt") or "請從上一則選項中選擇一項。",
+                    "reason": "model_option_selection_pending",
+                })
+                return pending, False
             return router, False
         selected_option_id = str(intent_matches[0].get("option_id") or "").strip()
         if not selected_option_id:
@@ -5268,11 +5611,9 @@ def is_likely_slot_answer(text: str) -> bool:
     if any(k in text for k in ["今天", "明天", "後天", "上午", "下午", "晚上"]):
         return True
 
-    # 短中文姓名，例如王大明
-    if 2 <= len(text) <= 4 and all("\u4e00" <= ch <= "\u9fff" for ch in text):
-        # 但排除常見意圖詞
-        if text not in ["網路", "電視", "帳單", "繳費", "優惠", "報修", "合約", "我的合約", "服務內容"]:
-            return True
+    # Reuse the slot validator so short service requests are not treated as names.
+    if 2 <= len(text) <= 4 and is_valid_person_name(text):
+        return True
 
     return False
 
@@ -5573,6 +5914,8 @@ def build_memory_without_active_flow(memory: Dict[str, Any]) -> Dict[str, Any]:
     known = dict(candidate.get("known_info", {}) or {})
     if known.get("troubleshooting_started") == "yes":
         known["_previous_troubleshooting_started"] = "yes"
+    if is_repair_form_available(memory):
+        known["repair_form_available"] = "yes"
     known["troubleshooting_started"] = "no"
     known["troubleshooting_step"] = None
     if not repair_escalation_active:
@@ -5661,9 +6004,17 @@ def requires_receipt_image_evidence(
     if barcode_labels >= 2:
         return True
 
-    paid = any(term in value for term in ("已繳費", "已經繳費", "繳費完成", "繳費成功", "已付款"))
-    restore = any(term in value for term in ("恢復", "復線", "開通", "不能看", "不能上網"))
-    return paid and restore
+    paid = any(term in value for term in (
+        "已繳費", "已經繳費", "已在超商繳費", "已經在超商繳費",
+        "繳費完成", "繳費成功", "已付款", "剛繳費", "繳完了",
+    ))
+    restore = any(term in value for term in (
+        "恢復", "復線", "復機", "開通", "不能看", "不能上網", "欠費停用",
+    ))
+    pending_reconnection = (memory or {}).get("pending_tool") in {
+        "bill_return_line_internet", "bill_return_line_tv",
+    }
+    return paid and (restore or pending_reconnection)
 
 
 def is_unpaid_partial_payment_question(user_text: str) -> bool:
@@ -5679,49 +6030,6 @@ def is_unpaid_partial_payment_question(user_text: str) -> bool:
     return explicitly_unpaid and asks_partial_payment
 
 
-def is_unpaid_reactivation_request(user_text: str) -> bool:
-    value = compact_text(user_text)
-    future_or_missing_payment = any(
-        term in value
-        for term in (
-            "未繳",
-            "沒繳",
-            "尚未繳",
-            "還沒繳",
-            "晚點去繳",
-            "晚點再繳",
-            "之後去繳",
-            "之後再繳",
-            "等等去繳",
-            "稍後去繳",
-        )
-    )
-    asks_reactivation = any(
-        term in value
-        for term in ("幫我恢復", "先恢復", "先復線", "恢復服務", "恢復使用", "先開通")
-    )
-    return future_or_missing_payment and asks_reactivation
-
-
-def build_unpaid_reactivation_router() -> Dict[str, Any]:
-    return {
-        "route": "direct_reply",
-        "intent": "unpaid_reactivation_guidance",
-        "tool_name": None,
-        "topic": "未繳費復線限制",
-        "should_cancel_current_flow": True,
-        "should_call_tool": False,
-        "should_retrieve_knowledge": False,
-        "knowledge_query": None,
-        "reply": (
-            "目前尚未完成繳費，無法先執行復線。請先透過官網或哈TV行動客服 APP 完成繳費，"
-            "待入帳後重新啟動數據機、分享器或機上盒；若已入帳仍未恢復，再由真人客服協助核對。"
-        ),
-        "extracted_slots": {},
-        "reason": "guard_unpaid_reactivation_no_tool_call",
-    }
-
-
 def build_unpaid_partial_payment_router() -> Dict[str, Any]:
     return {
         "route": "direct_reply",
@@ -5733,10 +6041,10 @@ def build_unpaid_partial_payment_router() -> Dict[str, Any]:
         "should_retrieve_knowledge": False,
         "knowledge_query": None,
         "reply": (
-            "您目前尚未繳費，因此這一輪不會直接執行復線。"
+            "這一輪先說明拆分繳費，不會直接執行復線。"
             "是否可只繳有線電視，以及各服務可拆分的待繳金額，需以帳單資料為準。"
             "請先至官網或哈TV行動客服 APP 查看待繳項目；若畫面無法分開繳納，"
-            "再由真人客服協助核對。完成繳費並入帳後，再重新啟動機上盒確認收視。"
+            "再由真人客服協助核對。若需復線，可另行提出申請，是否受理由系統判定。"
         ),
         "extracted_slots": {},
         "reason": "guard_unpaid_partial_payment_no_reactivation",
@@ -5779,6 +6087,48 @@ def detect_active_flow_switch(
         if any(term in model_context for term in ("tv_", "電視", "機上盒", "頻道"))
         else ""
     )
+    model_intent = str(router.get("intent") or "")
+    if (
+        model_intent == "repair_troubleshooting_intake"
+        and (memory.get("known_info") or {}).get("troubleshooting_started") == "yes"
+    ):
+        return None
+    same_repair_subject = (
+        not incoming_type
+        or incoming_type == active_type
+        or (
+            active_type in {"tv", "set_top_box_network"}
+            and model_intent.startswith("tv_set_top_box_")
+        )
+    )
+    if (
+        (memory.get("known_info") or {}).get("repair_form_offered") == "yes"
+        and router.get("route") in {"continue_current_flow", "troubleshooting"}
+        and same_repair_subject
+        and not router.get("should_cancel_current_flow")
+    ):
+        router.update({
+            "route": "direct_reply",
+            "intent": "repair_form_guidance",
+            "tool_name": None,
+            "should_call_tool": False,
+            "should_retrieve_knowledge": False,
+            "reply": "",
+            "reason": "repair_form_already_offered_same_issue",
+        })
+        return router
+    if (
+        is_repair_form_available(memory)
+        and router.get("intent") == "repair_form_guidance"
+    ):
+        router["should_cancel_current_flow"] = False
+        return router
+    if (
+        is_repair_escalation_active(memory)
+        and router.get("route") in {"continue_current_flow", "troubleshooting"}
+        and same_repair_subject
+    ):
+        return build_repeat_repair_escalation_router(memory)
     # A troubleshooting result means "continue" only when the LLM kept the
     # same service. A model-selected TV-to-network (or reverse) change is a
     # new issue and must replace the active SOP instead of consuming its next
@@ -5794,19 +6144,33 @@ def detect_active_flow_switch(
         return router
 
     if (
-        is_repair_escalation_active(memory)
-        and router.get("route") in {"continue_current_flow", "troubleshooting"}
-        and not router.get("should_cancel_current_flow")
-    ):
-        return build_repeat_repair_escalation_router(memory)
-
-    if (
         router.get("intent") == "human_handoff_offer"
-        and active_type in {"tv", "network", "remote"}
-        and incoming_type == active_type
+        and active_type in {"tv", "network", "remote", "set_top_box_network"}
+        and not router.get("should_cancel_current_flow")
     ):
         router["should_cancel_current_flow"] = False
         router["reason"] = "active_flow_troubleshooting_handoff_offer"
+        return router
+
+    if (
+        router.get("intent") == "human_handoff_request"
+        and is_repair_escalation_active(memory)
+        and not router.get("should_cancel_current_flow")
+    ):
+        router["reason"] = "active_repair_handoff_accepted"
+        return router
+
+    if (
+        active_type == "network"
+        and router.get("intent") == "network_speed_test_guidance"
+        and not router.get("should_cancel_current_flow")
+    ):
+        router.update({
+            "route": "continue_current_flow",
+            "intent": "troubleshooting",
+            "reply": "",
+            "reason": "active_network_speed_test_guidance_continuation",
+        })
         return router
 
     # A fresh LLM decision of ``troubleshooting`` while the same SOP is active
@@ -5828,19 +6192,14 @@ def detect_active_flow_switch(
     return None
 
 
-def should_cancel_pending_tool(user_text: str, router: Dict[str, Any], memory: Dict[str, Any]) -> bool:
+def should_cancel_pending_tool(router: Dict[str, Any], memory: Dict[str, Any]) -> bool:
     pending_tool = memory.get("pending_tool")
 
     if not pending_tool:
         return False
 
-    text = (user_text or "").strip()
     route = router.get("route")
     new_tool = router.get("tool_name")
-
-    # 如果看起來是補資料，不取消
-    if is_likely_slot_answer(text):
-        return False
 
     return route not in {"unknown", "continue_current_flow"} and (
         route != "tool_action" or new_tool != pending_tool
@@ -6209,7 +6568,6 @@ def run_tool_or_rag_flow(
                 if not tool_result.get("success"):
                     reply = tool_result.get("message", "資料不足，請再補充必要資訊。")
                     if tool_name in IDENTITY_LOOKUP_TOOL_NAMES:
-                        reply = f"本次操作未完成。{reply}"
                         if "真人客服" not in reply:
                             reply += " 若重新確認資料後仍無法完成，請由真人客服協助核對。"
                     memory, should_remind_human_service = update_identity_lookup_failure_state(
@@ -6244,6 +6602,19 @@ def run_tool_or_rag_flow(
             or router.get("knowledge_query")
             or user_text
         )
+        if plan.get("intent") == "remote_power_learning":
+            original_query = "複製遙控器的功能如何操作 學習 電視電源 音量"
+        elif plan.get("intent") == "auto_payment_guidance":
+            original_query = "循環扣款 綁定信用卡 自動扣款 申請方式"
+        elif plan.get("intent") == "invoice_win_notification":
+            original_query = "中獎發票一定要到櫃檯領取嗎?"
+        elif plan.get("intent") == "youtube_on_tv_guidance":
+            original_query = "免費觀看YouTube 聯網機上盒功能 雙模機功能"
+        elif plan.get("intent") == "relocation_guidance":
+            original_query = (
+                f"{memory.get('company') or ''} 有線電視 基本收費標準 "
+                "移機費 室外移機費 室內移機費 寬頻網路移機費"
+            ).strip()
         original_query = build_promotion_scope_query(
             original_query,
             plan.get("promotion_scope"),
@@ -6266,6 +6637,11 @@ def run_tool_or_rag_flow(
             or has_active_campaign_detail
             or plan.get("intent") == "promotion_named_campaign_selection"
             or plan.get("intent") == "digital_tv_package_addon"
+            or plan.get("intent") in {
+                "remote_power_learning", "auto_payment_guidance",
+                "invoice_win_notification", "youtube_on_tv_guidance",
+                "relocation_guidance",
+            }
             or plan.get("promotion_query_kind") == "catalog"
         )
         # A named digital-TV package has already been identified by the LLM.
@@ -6299,12 +6675,16 @@ def run_tool_or_rag_flow(
             top_k=retrieval_top_k,
         )
         latency["rag_retrieved_docs"] = len(docs)
+        docs = [*policy_evidence_for_intent(memory, plan.get("intent")), *docs]
         docs = constrain_promotion_documents(
             docs,
             plan.get("promotion_scope"),
             plan.get("promotion_query_kind"),
             bool(plan.get("social_discount_requested")),
             memory=memory,
+        )
+        docs = focus_knowledge_process_docs(
+            docs, plan.get("intent"), plan.get("promotion_query_kind")
         )
         docs = carry_forward_same_intent_evidence(
             docs,
@@ -6370,6 +6750,11 @@ def run_tool_or_rag_flow(
                 fallback_reply=(
                     POINTS_USAGE_FALLBACK_REPLY
                     if plan.get("intent") == "points_usage_query"
+                    else ACCOUNT_HOLDER_CHANGE_DOCUMENTS_REPLY
+                    if plan.get("intent") in {
+                        "account_transfer_process",
+                        "service_transfer_document_requirements",
+                    }
                     else None
                 ),
                 prefer_compact_upgrade=(
@@ -6395,6 +6780,7 @@ def run_tool_or_rag_flow(
             )
         memory["last_knowledge_results"] = answerable_docs
         memory["last_knowledge_intent"] = plan.get("intent")
+        memory["last_knowledge_query"] = enhanced_query
         memory = remember_campaign_topic(
             memory,
             reply=reply,
@@ -6419,6 +6805,7 @@ def run_tool_or_rag_flow(
     else:
         memory["last_knowledge_results"] = []
         memory["last_knowledge_intent"] = None
+        memory["last_knowledge_query"] = None
 
     memory.pop("_recent_slot_status", None)
     return reply, memory
@@ -6466,9 +6853,7 @@ def handle_chat_message(
         or is_repair_escalation_active(memory)
     )
     active_flow_router = None
-    if is_troubleshooting or (
-        in_pending_mode and not is_likely_slot_answer(user_text)
-    ):
+    if is_troubleshooting:
         active_flow_router = detect_active_flow_switch(
             user_text=user_text,
             memory=memory,
@@ -6492,30 +6877,6 @@ def handle_chat_message(
 
     clarify_context = memory.get("clarify_context")
 
-    invalid_customer_number_router = None
-    invalid_customer_number_plan = None
-    if (
-        in_pending_mode
-        and pending_tool in IDENTITY_LOOKUP_TOOL_NAMES
-        and has_invalid_customer_number_format(user_text)
-    ):
-        invalid_reply = "請提供有效的客戶編號、戶名、登記電話任兩項。"
-        invalid_customer_number_router = {
-            "route": "direct_reply",
-            "intent": "invalid_customer_number_format",
-            "tool_name": None,
-            "topic": pending_tool,
-            "should_cancel_current_flow": False,
-            "should_call_tool": False,
-            "should_retrieve_knowledge": False,
-            "knowledge_query": None,
-            "reply": invalid_reply,
-            "extracted_slots": {},
-            "reason": "invalid_pending_customer_number_format",
-        }
-        invalid_customer_number_plan = build_plan_from_router(invalid_customer_number_router)
-        invalid_customer_number_plan["skip_pending_tool_call"] = True
-
     router = {
         "route": "continue_current_flow" if is_troubleshooting else "unknown",
         "intent": "troubleshooting" if is_troubleshooting else "other",
@@ -6531,11 +6892,7 @@ def handle_chat_message(
     }
 
     # 1. 如果使用者正在回答上一輪 clarify，先解析 clarify_context
-    if invalid_customer_number_plan:
-        router = invalid_customer_number_router or router
-        plan = invalid_customer_number_plan
-
-    elif active_switch_router:
+    if active_switch_router:
         router = active_switch_router
         plan = build_plan_from_router(router)
         if router.get("route") == "clarify":
@@ -6544,7 +6901,9 @@ def handle_chat_message(
                 original_query=user_text,
             )
         if router.get("route") == "troubleshooting":
-            plan = apply_troubleshooting_engine(user_text, memory, plan, llm=llm)
+            plan = apply_troubleshooting_engine(
+                user_text, memory, plan, llm=llm, history=contextual_history
+            )
 
     # 2. 如果正在排錯，且不是 pending tool 收資料，直接進 SOP，不先跑 Router
     elif is_troubleshooting and not in_pending_mode:
@@ -6553,21 +6912,14 @@ def handle_chat_message(
             plan = build_plan_from_router(router)
         else:
             plan = build_troubleshooting_plan(memory)
-        if plan.get("intent") != "human_handoff_offer":
-            plan = apply_troubleshooting_engine(user_text, memory, plan, llm=llm)
+        if plan.get("intent") not in {"human_handoff_offer", "repair_form_guidance"}:
+            plan = apply_troubleshooting_engine(
+                user_text, memory, plan, llm=llm, history=contextual_history
+            )
 
     else:
-        # A non-slot message while a tool is waiting for identity data is a
-        # fresh customer turn. Clear only the pending collection state before
-        # asking the LLM to classify it, so an unfinished account query cannot
-        # force a later plan, fault, or knowledge question back into the same
-        # tool flow.
-        if in_pending_mode and not is_likely_slot_answer(user_text):
-            memory = clear_pending_tool(memory)
-            pending_tool = None
-            in_pending_mode = False
-
-        # 3. 非排錯狀態才跑 Router
+        # Keep pending context visible to the model so it can distinguish a
+        # slot answer from a new request in one routing pass.
         t0 = time.perf_counter()
         router = run_intent_router(
             user_input=user_text,
@@ -6583,6 +6935,8 @@ def handle_chat_message(
         )
         if validated_context_selection:
             memory["clarify_context"] = None
+        if not in_pending_mode:
+            router = carry_forward_knowledge_intent(router, memory)
 
         # A campaign-detail route is the model's semantic confirmation that
         # this turn continues the validated dynamic campaign. Do not let a
@@ -6594,21 +6948,14 @@ def handle_chat_message(
         ):
             router["should_cancel_current_flow"] = False
 
-        # 如果正在 pending tool，但使用者明顯換話題，取消原本 pending tool
-        if should_cancel_pending_tool(user_text, router, memory):
+        if in_pending_mode and router.get("reason") == "model_router_unavailable":
+            # Preserve pending state, but never execute a stale tool when the
+            # model could not decide whether this turn changed intent.
+            pass
+        elif should_cancel_pending_tool(router, memory):
             memory = clear_pending_tool(memory)
             pending_tool = None
             in_pending_mode = False
-
-            t1 = time.perf_counter()
-            router = run_intent_router(
-                user_input=user_text,
-                memory=memory,
-                history=contextual_history,
-                llm=llm,
-            )
-            latency["intent_router_reroute"] = time.perf_counter() - t1
-
         elif in_pending_mode and pending_tool:
             router = {
                 "route": "tool_action",
@@ -6623,17 +6970,55 @@ def handle_chat_message(
                 "extracted_slots": {},
                 "reason": "pending_tool_continue",
             }
+            if (
+                pending_tool in IDENTITY_LOOKUP_TOOL_NAMES
+                and has_invalid_customer_number_format(user_text)
+            ):
+                router = {
+                    **router,
+                    "route": "direct_reply",
+                    "intent": "invalid_customer_number_format",
+                    "tool_name": None,
+                    "should_call_tool": False,
+                    "reply": "請提供有效的客戶編號、戶名、登記電話任兩項。",
+                    "reason": "invalid_pending_customer_number_format",
+                }
+
+        # The model may keep a bill-identity clarification without creating a
+        # pending tool. Validate the supplied customer number only after that
+        # semantic continuation has been established.
+        if (
+            not in_pending_mode
+            and router.get("route") in {"continue_current_flow", "clarify"}
+            and router.get("intent") == "bill_query"
+            and has_invalid_customer_number_format(user_text)
+        ):
+            router = {
+                **router,
+                "route": "direct_reply",
+                "intent": "invalid_customer_number_format",
+                "tool_name": None,
+                "should_call_tool": False,
+                "reply": "請提供有效的客戶編號、戶名、登記電話任兩項。",
+                "reason": "invalid_bill_customer_number_format",
+            }
 
         if router.get("should_cancel_current_flow") or router.get("route") == "switch_topic":
             memory = clear_current_flow(memory)
 
         plan = build_plan_from_router(router)
+        if in_pending_mode and router.get("reason") in {
+            "model_router_unavailable", "invalid_pending_customer_number_format",
+        }:
+            plan["skip_pending_tool_call"] = True
 
         if router.get("route") == "clarify":
             memory["clarify_context"] = build_clarify_context(router, original_query=user_text)
 
         if router.get("route") in ["troubleshooting", "continue_current_flow"]:
-            plan = apply_troubleshooting_engine(user_text, memory, plan, llm=llm)
+            plan = apply_troubleshooting_engine(
+                user_text, memory, plan, llm=llm, history=contextual_history
+            )
 
         elif router.get("intent") == "remote_input_source_help":
             plan = start_tv_input_source_troubleshooting(
@@ -6641,6 +7026,21 @@ def handle_chat_message(
                 memory,
                 plan,
             )
+
+    if plan.get("intent") == "repair_form_guidance" and not is_repair_form_available(memory):
+        router.update({
+            "route": "troubleshooting",
+            "intent": "repair_troubleshooting_intake",
+            "should_cancel_current_flow": False,
+            "reply": "",
+            "reason": "repair_form_requires_troubleshooting_first",
+        })
+        plan = apply_troubleshooting_engine(
+            user_text, memory, build_plan_from_router(router), llm=llm,
+            history=contextual_history,
+        )
+    elif plan.get("intent") == "repair_form_guidance":
+        memory.setdefault("known_info", {})["repair_form_offered"] = "yes"
 
     if (
         (plan.get("tool_name") == "create_repair_ticket" and plan.get("should_call_tool") is True)
@@ -6690,7 +7090,13 @@ def handle_chat_message(
                 memory,
                 build_plan_from_router(router),
                 llm=llm,
+                history=contextual_history,
             )
+
+    if plan.get("intent") == "human_handoff_request" and is_repair_escalation_active(memory):
+        known = memory.setdefault("known_info", {})
+        known["human_handoff_active"] = "yes"
+        known["human_handoff_topic"] = str(plan.get("topic") or "故障後續處理")
 
     if plan.get("intent") == "human_handoff_offer":
         known = memory.get("known_info", {})
@@ -6712,24 +7118,14 @@ def handle_chat_message(
             original_query=user_text,
         )
 
-    # An explicit unpaid statement can never authorize a reactivation API.
-    # Keep this as an action-safety invariant after the LLM has interpreted
-    # the customer's billing question.
-    if is_unpaid_reactivation_request(user_text):
-        memory = clear_current_flow(memory)
-        in_pending_mode = False
-        pending_tool = None
-        router = build_unpaid_reactivation_router()
-        plan = build_plan_from_router(router)
-    elif is_unpaid_partial_payment_question(user_text):
+    if is_unpaid_partial_payment_question(user_text):
         memory = clear_current_flow(memory)
         in_pending_mode = False
         router = build_unpaid_partial_payment_router()
         plan = build_plan_from_router(router)
 
-    # This post-routing safety gate also covers an old pending flow or an
-    # in-progress troubleshooting state. It can only prevent an account-side
-    # action; a verified image is still required before the payment API runs.
+    # Paid reactivation requires receipt evidence; unpaid reactivation does not.
+    # The barcode payment API still requires a verified image, never typed codes.
     if requires_receipt_image_evidence(user_text, router, memory):
         receipt_evidence = current_verified_receipt_image_evidence(memory, user_text)
         memory = clear_current_flow(memory)
@@ -6858,6 +7254,7 @@ def handle_chat_message(
 
     should_extract_slots = (
             not is_clarify_resolved
+            and router.get("reason") != "model_router_unavailable"
             and (
                     in_pending_mode
                     or plan.get("should_call_tool") is True

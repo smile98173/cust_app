@@ -65,8 +65,8 @@ LINE webhook `/api/line/{bot_code}/webhook` 不使用這個 token，仍使用 LI
 
 | 欄位 | 必填 | 說明 |
 | --- | --- | --- |
-| `user_id` | 是 | 會員識別或訪客流水號。後端會正規化為 `web:{user_id}`。登入會員且未另傳 `custnum` 時，系統會沿用會員識別作為 CUST_API 客戶編號。 |
-| `is_logged_in` | 是 | 是否為登入會員。會員帶 `true`，訪客帶 `false`。 |
+| `user_id` | 是 | `is_logged_in=true` 時為 CUST_API 客編；`false` 時為訪客流水號。會話識別分別為 `web:{客編}` 和 `web:guest:{流水號}`。 |
+| `is_logged_in` | 是 | 判斷 `user_id` 內容的依據：客編帶 `true`，訪客流水號帶 `false`；每輪都須傳入。 |
 | `company_code` | 是 | 系統台代碼，例如 `tdtv`。 |
 | `msg` | 是 | 使用者本輪輸入文字。 |
 | `request_id` | 否 | 呼叫方的請求識別碼，方便查 log。 |
@@ -85,10 +85,9 @@ LINE webhook `/api/line/{bot_code}/webhook` 不使用這個 token，仍使用 LI
 ```json
 {
   "request_id": "req_001",
-  "user_id": "member_123456",
+  "user_id": "905397",
   "is_logged_in": true,
   "company_code": "tdtv",
-  "custnum": "A000001",
   "msg": "優惠套餐有哪些?",
   "metadata": {
     "page": "customer-service"
@@ -114,7 +113,7 @@ LINE webhook `/api/line/{bot_code}/webhook` 不使用這個 token，仍使用 LI
 {
   "status": "success",
   "request_id": "req_001",
-  "user_id": "web:member_123456",
+  "user_id": "web:905397",
   "msg": "目前查到的優惠重點如下：\n1. ...\n2. ...",
   "links": [],
   "actions": []
@@ -128,7 +127,7 @@ LINE webhook `/api/line/{bot_code}/webhook` 不使用這個 token，仍使用 LI
 ```json
 {
   "request_id": "req_002",
-  "user_id": "member_123456",
+  "user_id": "905397",
   "is_logged_in": true,
   "company_code": "tdtv",
   "msg": "那100M的月租是多少?"
@@ -141,7 +140,7 @@ LINE webhook `/api/line/{bot_code}/webhook` 不使用這個 token，仍使用 LI
 {
   "status": "success",
   "request_id": "req_002",
-  "user_id": "web:member_123456",
+  "user_id": "web:905397",
   "msg": "100M 相關方案目前查到的重點如下：\n1. ...\n2. ...",
   "links": [],
   "actions": []
@@ -153,17 +152,17 @@ LINE webhook `/api/line/{bot_code}/webhook` 不使用這個 token，仍使用 LI
 本系統會自行保存：
 
 ```text
-user_id = web:{外部傳入 user_id}
+user_id = web:{客編} 或 web:guest:{流水號}
 is_logged_in
 known_info.member_id = member_id 或 user_id（登入會員）
-known_info.custnum = custnum；若未傳 custnum，登入會員會沿用 member_id / user_id
+known_info.custnum = 登入時的 user_id；若另有明確 custnum，以明確欄位優先
 ai_state / memory
 chat_logs
 company_code
 updated_at
 ```
 
-登入會員若 `is_logged_in = true`，後端會保存會員識別到 `member_id`，並在未另傳 `custnum` 時沿用它作為 CUST_API 的 `custNo`。若 Web 端會員識別不等於 CUST_API 客戶編號，請明確傳入正確 `custnum`，或不要讓會員識別走客編查詢流程。
+登入會員若 `is_logged_in = true`，Web 傳入的有效數字 `user_id` 會視為系統帶入的 CUST_API 客編；`false` 或未傳登入旗標時，`user_id` 只作為訪客會話識別。舊版另傳 `custnum` 或 `metadata.custnum` 時，明確欄位優先；對話中自行輸入的其他客編仍需核對。回應的會話 ID 分別為 `web:{客編}` 與 `web:guest:{訪客流水號}`，後續請求仍使用原始 `user_id`。
 
 SQLite 測試環境會寫入：
 
@@ -188,7 +187,7 @@ aicust_service.web_conversations
 {
   "status": "success",
   "request_id": "req_003",
-  "user_id": "web:member_123456",
+  "user_id": "web:905397",
   "msg": "大屯有線公司網址：\n<a href=\"https://www.tdtv.com.tw/\" target=\"_blank\" rel=\"noopener noreferrer\">官網</a>",
   "links": [
     {
@@ -229,8 +228,8 @@ aicust_service.web_conversations
 {
   "status": "success",
   "request_id": "req_handoff_001",
-  "user_id": "web:member_123456",
-  "msg": "此項需由真人文字客服協助處理。<br>請按 <a href=\"http://pweb.topmso.com.tw:96/smartCustomerService/real/member_123456/0/T?token={Base64URL token}\">轉真人文字客服</a><br>或者繼續提問",
+  "user_id": "web:905397",
+  "msg": "此項需由真人文字客服協助處理。<br>請按 <a href=\"http://pweb.topmso.com.tw:96/smartCustomerService/real/905397/0/T?token={Base64URL token}\">轉真人文字客服</a><br>或者繼續提問",
   "links": [],
   "actions": [
     {
@@ -271,7 +270,7 @@ Token 原文為 `{流水號或客編}+{Unix timestamp}`，使用雙方約定的 
 {
   "status": "success",
   "request_id": "req_handoff_confirm_001",
-  "user_id": "web:member_123456",
+  "user_id": "web:905397",
   "msg": "請問您目前遇到什麼問題？我會先協助您處理；若確認無法在線上協助，再幫您轉接真人客服。",
   "links": [],
   "actions": []
@@ -339,7 +338,7 @@ OCR 後接續 AI 對話範例：
 ```json
 {
   "request_id": "req_ocr_001",
-  "user_id": "member_123456",
+  "user_id": "905397",
   "is_logged_in": true,
   "company_code": "tdtv",
   "msg": "我上傳了一張圖片，辨識內容如下：\n代收項目: ...\n第一段條碼: ...\n第二段條碼: ...\n第三段條碼: ..."
@@ -358,7 +357,7 @@ OCR 後接續 AI 對話範例：
 正式 Web server 不需要保存 AI 狀態，只需要：
 
 1. 決定會員或訪客 `user_id`。
-2. 登入會員帶 `is_logged_in = true`，並讓 `user_id` 使用穩定會員識別。
+2. 登入會員帶 `is_logged_in = true` 並以客編作 `user_id`；訪客帶 `false` 並以流水號作 `user_id`。
 3. 帶入 `company_code`。
 4. 把使用者輸入放在 `msg`。
 5. 呼叫 `POST /api/v1/chat`。

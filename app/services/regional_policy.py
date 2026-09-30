@@ -306,6 +306,10 @@ def build_policy_prompt(
         prompt = get_policy_text(memory, rule_key, "prompt")
         if prompt:
             lines.append(f"- {prompt}")
+            if rule_key == "support.remote_control_price":
+                answer = get_policy_text(memory, rule_key, "reply")
+                if answer:
+                    lines.append(f"  當期政策資料：{answer}")
     if not lines:
         return "- 本次僅套用全域安全規則。"
     context = (memory or {}).get("policy_context") or {}

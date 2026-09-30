@@ -74,6 +74,164 @@ class ExternalChatSchemaTest(unittest.TestCase):
         self.assertEqual(memory["known_info"]["custnum"], "905397")
         self.assertEqual(memory["known_info"]["custnum_source"], "web_authenticated")
 
+    def test_followup_member_id_does_not_replace_authenticated_customer_number(self):
+        from app.app_backend import apply_external_user_context
+
+        memory = apply_external_user_context(
+            {},
+            ExternalChatRequest(
+                user_id="7837", member_id="7837", custnum="905397",
+                is_logged_in=True, msg="查詢帳單繳費截止日期",
+            ),
+            "7837",
+            "web:7837",
+        )
+        memory = apply_external_user_context(
+            memory,
+            ExternalChatRequest(
+                user_id="7837", member_id="7837",
+                is_logged_in=True, msg="還有其他帳單嗎",
+            ),
+            "7837",
+            "web:7837",
+        )
+
+        self.assertEqual(memory["known_info"]["custnum"], "905397")
+        self.assertEqual(memory["known_info"]["custnum_source"], "web_authenticated")
+
+    def test_logged_in_user_id_is_authenticated_customer_number(self):
+        from app.app_backend import apply_external_user_context
+        from app.services.customer_validation import has_authenticated_web_custnum
+        from app.services.slot_manager import get_missing_tool_args
+
+        memory = apply_external_user_context(
+            {},
+            ExternalChatRequest(
+                user_id="7837", member_id="9999",
+                is_logged_in=True, msg="查詢帳單",
+            ),
+            "7837",
+            "web:7837",
+        )
+
+        self.assertTrue(memory["is_logged_in"])
+        self.assertEqual(memory["known_info"]["member_id"], "9999")
+        self.assertEqual(memory["known_info"]["custnum"], "7837")
+        self.assertEqual(memory["known_info"]["custnum_source"], "web_authenticated")
+        self.assertTrue(has_authenticated_web_custnum(memory))
+        self.assertEqual(get_missing_tool_args("search_bill", memory), [])
+        self.assertEqual(get_missing_tool_args("search_contract_info", memory), [])
+
+    def test_guest_user_id_and_missing_login_flag_are_not_customer_numbers(self):
+        from app.app_backend import apply_external_user_context
+
+        for login_state in (False, None):
+            with self.subTest(login_state=login_state):
+                memory = apply_external_user_context(
+                    {},
+                    ExternalChatRequest(
+                        user_id="7837", member_id="7837",
+                        is_logged_in=login_state, msg="查詢帳單",
+                    ),
+                    "7837",
+                    "web:7837",
+                )
+                self.assertFalse(memory["is_logged_in"])
+                self.assertNotIn("custnum", memory["known_info"])
+                self.assertNotIn("custnum_source", memory["known_info"])
+
+    def test_guest_and_member_with_same_user_id_have_separate_sessions(self):
+        from app.app_backend import normalize_external_session_user_id
+
+        self.assertEqual(
+            normalize_external_session_user_id(
+                ExternalChatRequest(user_id="7837", is_logged_in=True), "7837"
+            ),
+            "web:7837",
+        )
+        self.assertEqual(
+            normalize_external_session_user_id(
+                ExternalChatRequest(user_id="7837", is_logged_in=False), "7837"
+            ),
+            "web:guest:7837",
+        )
+
+    def test_logged_in_non_customer_user_id_is_not_trusted(self):
+        from app.app_backend import apply_external_user_context
+
+        memory = apply_external_user_context(
+            {},
+            ExternalChatRequest(
+                user_id="member_123456", is_logged_in=True, msg="查詢帳單",
+            ),
+            "member_123456",
+            "web:member_123456",
+        )
+
+        self.assertNotIn("custnum", memory["known_info"])
+        self.assertNotIn("custnum_source", memory["known_info"])
+
+    def test_followup_login_does_not_promote_chat_customer_number(self):
+        from app.app_backend import apply_external_user_context
+
+        memory = {
+            "known_info": {
+                "custnum": "905397",
+                "custnum_source": "user_provided",
+            }
+        }
+        memory = apply_external_user_context(
+            memory,
+            ExternalChatRequest(
+                user_id="7837", is_logged_in=True, msg="還有其他帳單嗎",
+            ),
+            "7837",
+            "web:7837",
+        )
+
+        self.assertEqual(memory["known_info"]["custnum"], "905397")
+        self.assertEqual(memory["known_info"]["custnum_source"], "user_provided")
+
+    def test_guest_followup_preserves_chat_entered_customer_number(self):
+        from app.app_backend import apply_external_user_context
+        from app.services.slot_manager import get_missing_tool_args
+
+        memory = {
+            "known_info": {
+                "custnum": "905397",
+                "custnum_source": "user_provided",
+            }
+        }
+        memory = apply_external_user_context(
+            memory,
+            ExternalChatRequest(user_id="guest_1", is_logged_in=False, msg="還有呢"),
+            "guest_1",
+            "web:guest_1",
+        )
+
+        self.assertEqual(memory["known_info"]["custnum"], "905397")
+        self.assertEqual(memory["known_info"]["custnum_source"], "user_provided")
+        self.assertEqual(get_missing_tool_args("search_bill", memory), ["identity_pair"])
+
+    def test_logout_removes_authenticated_customer_number(self):
+        from app.app_backend import apply_external_user_context
+
+        memory = apply_external_user_context(
+            {},
+            ExternalChatRequest(user_id="7837", is_logged_in=True, msg="查帳單"),
+            "7837",
+            "web:7837",
+        )
+        memory = apply_external_user_context(
+            memory,
+            ExternalChatRequest(user_id="7837", is_logged_in=False, msg="查帳單"),
+            "7837",
+            "web:7837",
+        )
+
+        self.assertNotIn("custnum", memory["known_info"])
+        self.assertNotIn("custnum_source", memory["known_info"])
+
     def test_legacy_nested_user_can_pass_custnum_and_phone(self):
         request = ExternalChatRequest(
             user={

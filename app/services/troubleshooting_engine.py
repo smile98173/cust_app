@@ -44,6 +44,7 @@ label 可為：
 - 若目前步驟是在請使用者確認或操作某件事，使用者回答「狀況沒有改善、結果跟前面一樣、仍然不能用、仍然沒有亮」時，應判斷為 failed 或 negative。
 - 若使用者表示已經做過重插電、重開、切換、檢查等操作，但狀況仍一樣或燈號/畫面仍異常，應判斷為 failed。
 - 若使用者明確說已恢復、可以了，判斷為 recovered。
+- 「對／是」只回答上一則客服實際提出的問題；若問的是是否完成重開等操作，不得當成服務恢復。若上一則同時問操作與恢復結果，而短答無法區分，判斷為 unknown。
 - 若使用者要停止排錯、要報修、要派人，判斷為 refuse。
 - 若已在排錯中，使用者只說「回報故障」或「回報故髒」，而沒有說要派人、立即報修或不想排錯，判斷為 fault_report；這是在重申問題，應繼續診斷，不是直接轉真人。
 - 若正在處理網路問題，且使用者說新設備不能用、換回舊設備就正常，判斷為 device_replacement。
@@ -51,8 +52,10 @@ label 可為：
 - 若正在處理機上盒網路問題，使用者只是補充 Wi-Fi／網路訊號正常，但進入應用程式時顯示無法連網，判斷為 app_connectivity_detail。除非使用者同時明確說已完成重新連線、重開與其他應用程式測試仍失敗，否則不可判斷為 failed。
 - 若使用者只是說不知道、不會看、不確定，判斷為 unknown；不要硬猜。
 
+只有明確確認服務恢復時才能輸出 recovered；此時 reply 為依實際故障與確認結果撰寫的簡短客服收尾，不使用制式結案句。其他 label 的 reply 留空，不宣稱已恢復或已建立工單。
+
 只能輸出 JSON：
-{"label": "unknown"}
+{"label": "unknown", "reply": ""}
 """
 
 
@@ -90,7 +93,7 @@ STEP_CONTEXTS = {
     "remote_check_receiver": "已確認遙控器按鍵有亮紅燈，正在確認是否對準機上盒、IR 接收器是否遮住或脫落。",
     "net_check_scope": "正在確認是所有設備都不能上網，還是只有單一手機或電腦不能上網。",
     "net_check_modem_light": "正在確認數據機燈號是否正常、紅燈、異常閃爍或完全沒亮。",
-    "net_reboot_modem": "已請使用者重開數據機，正在確認網路是否恢復。",
+    "net_reboot_modem": "已進入重開數據機流程；依上一則客服提問，區分是否完成重開與網路是否恢復。",
     "net_single_device": "已請使用者重新連線單一設備的 Wi-Fi 或網路線，正在確認該設備是否恢復。",
     "net_phone_connection_type": "正在確認手機使用的是家中 Wi-Fi 還是 4G/5G 行動網路。",
     "net_computer_connection_type": "正在確認電腦使用的是 Wi-Fi 還是實體網路線。",
@@ -151,13 +154,19 @@ def classify_reply_by_keywords(text: str) -> str:
     return "unknown"
 
 
-def classify_reply(text: str, step: str, issue_description: str = "", llm=None) -> str:
+def classify_reply(
+    text: str,
+    step: str,
+    issue_description: str = "",
+    last_assistant_reply: str = "",
+    llm=None,
+) -> Dict[str, str]:
     if llm is None:
-        return classify_reply_by_keywords(text)
+        return {"label": classify_reply_by_keywords(text), "reply": ""}
 
     prompt = ChatPromptTemplate.from_template(
         "{rules}\n\n目前步驟代碼：{step}\n目前步驟語境：{step_context}\n"
-        "先前問題描述：{issue_description}\n使用者回覆：{text}"
+        "先前問題描述：{issue_description}\n上一則客服回覆：{last_assistant_reply}\n使用者回覆：{text}"
     )
 
     try:
@@ -167,6 +176,7 @@ def classify_reply(text: str, step: str, issue_description: str = "", llm=None) 
             "step": step,
             "step_context": STEP_CONTEXTS.get(step, "請依目前步驟與使用者回覆判斷。"),
             "issue_description": issue_description,
+            "last_assistant_reply": last_assistant_reply[-800:],
             "text": text,
         })
         data = safe_json_loads(resp.content)
@@ -175,10 +185,20 @@ def classify_reply(text: str, step: str, issue_description: str = "", llm=None) 
             "affirmative", "negative", "recovered", "failed", "refuse", "fault_report",
             "device_replacement", "app_connectivity_detail", "unknown",
         ]:
-            return "unknown"
-        return label
+            return {"label": "unknown", "reply": ""}
+        return {
+            "label": label,
+            "reply": str(data.get("reply") or "").strip() if label == "recovered" else "",
+        }
     except Exception:
-        return "unknown"
+        return {"label": "unknown", "reply": ""}
+
+
+def latest_assistant_reply(history: list[dict[str, str]] | None) -> str:
+    for item in reversed(history or []):
+        if item.get("role") == "assistant":
+            return str(item.get("content") or item.get("message") or "")
+    return ""
 
 
 def classify_fault_category_by_llm(text: str, memory: Dict[str, Any], llm=None) -> str | None:
@@ -487,7 +507,7 @@ def build_declared_speed_retest_reply(declared: float, measured: float) -> str:
     return (
         f"了解，您表示申辦速率為 {declared:g} Mbps，但目前實測約 {measured:g} Mbps，"
         "差距明顯，先確認測速條件。\n\n"
-        "1. 請將電腦以網路線直接連接數據機或分享器，暫時不要使用 Wi-Fi。\n"
+        "1. 請將電腦以網路線直接連接數據機，不經分享器或 Wi-Fi；若不方便操作，請告訴我。\n"
         "2. 關閉下載、雲端同步、影音串流及其他大量用網設備。\n"
         "3. 將數據機及分享器電源拔掉約 10 秒後重新插上，等待 3 到 5 分鐘，再到 www.speedtest.net 重測下載與上傳速度。\n\n"
         "若重測後仍明顯低於申辦速率，或您想直接報修，請告訴我，我會接續安排線路與設備檢查。"
@@ -641,6 +661,14 @@ def is_already_rebooted_reply(text: str) -> bool:
         "拔插後",
         "重拔插頭",
         "都試過",
+    ])
+
+
+def is_failed_step_outcome_reply(text: str) -> bool:
+    compact = (text or "").replace(" ", "").replace("　", "")
+    return contains_any(compact, [
+        "沒用", "沒有用", "沒效", "無效", "沒效果", "沒改善", "沒有改善",
+        "還是", "仍然", "依然", "一樣",
     ])
 
 
@@ -1446,6 +1474,7 @@ def continue_set_top_box_network_troubleshooting(
     memory: Dict[str, Any],
     plan: Dict[str, Any],
     llm=None,
+    last_assistant_reply: str = "",
 ) -> Dict[str, Any]:
     known = memory.setdefault("known_info", {})
 
@@ -1461,12 +1490,15 @@ def continue_set_top_box_network_troubleshooting(
         )
 
     step = str(known.get("troubleshooting_step") or "stb_network_check")
-    label = classify_reply(
+    decision = classify_reply(
         user_text,
         step,
         issue_description=str(known.get("issue_description") or ""),
+        last_assistant_reply=last_assistant_reply,
         llm=llm,
     )
+    label = decision["label"]
+    plan["resolution_reply"] = decision["reply"]
     known["_llm_step_classifier_used"] = "yes" if llm is not None else "no"
 
     if label == "recovered":
@@ -1507,11 +1539,36 @@ def continue_set_top_box_network_troubleshooting(
         plan["tool_name"] = None
         return plan
 
-    plan["reply"] = (
-        "目前會繼續針對哈TV機上盒本身排除，不會改成一般寬頻斷線流程。"
-        "請確認機上盒已重新連接 Wi-Fi 或網路線並重開機，接著測試另一個聯網應用程式；"
-        "再告訴我是單一應用程式，還是所有聯網功能都無法使用。"
-    )
+    repeats = int(known.get("stb_network_instruction_repeats") or 0)
+    known["stb_network_instruction_repeats"] = repeats + 1
+    if repeats >= 2:
+        if step == "stb_app_connectivity_check":
+            plan["reply"] = (
+                "機上盒應用程式無法連線，可依序確認：\n"
+                "1. 在機上盒網路設定中斷開 Wi-Fi，再重新連線。\n"
+                "2. 重新啟動機上盒。\n"
+                "3. 測試另一個需要網路的應用程式。\n"
+                "請告訴我完成後是單一應用程式，還是全部聯網功能仍無法使用。"
+            )
+        else:
+            plan["reply"] = (
+                "機上盒聯網排除可依序確認：\n"
+                "1. 檢查 Wi-Fi 是否連上，或網路線兩端是否插緊。\n"
+                "2. 將機上盒電源拔除約 10 秒後重新啟動。\n"
+                "3. 測試另一個需要網路的應用程式。\n"
+                "請告訴我完成後哪一步仍無法使用。"
+            )
+    elif repeats:
+        plan["reply"] = (
+            "請問前述重新連線、重新啟動機上盒及測試另一個應用程式的步驟，"
+            "目前完成到哪一步？測試後是只有單一應用程式，還是所有聯網功能仍無法使用？"
+        )
+    else:
+        plan["reply"] = (
+            "請在哈TV機上盒的網路設定確認 Wi-Fi 已連上，若使用網路線則檢查兩端是否插緊；"
+            "接著將機上盒電源拔除約 10 秒後重新啟動，並測試另一個需要網路的應用程式。"
+            "完成後請告訴我是單一應用程式，還是所有聯網功能都無法使用。"
+        )
     plan["should_call_tool"] = False
     plan["tool_name"] = None
     return plan
@@ -1549,14 +1606,18 @@ def continue_router_path_troubleshooting(
     memory: Dict[str, Any],
     plan: Dict[str, Any],
     llm=None,
+    last_assistant_reply: str = "",
 ) -> Dict[str, Any]:
     known = memory.setdefault("known_info", {})
-    label = classify_reply(
+    decision = classify_reply(
         user_text,
         "net_router_path_check",
         issue_description=str(known.get("issue_description") or ""),
+        last_assistant_reply=last_assistant_reply,
         llm=llm,
     )
+    label = decision["label"]
+    plan["resolution_reply"] = decision["reply"]
     known["_llm_step_classifier_used"] = "yes" if llm is not None else "no"
     if label == "recovered":
         return finish_troubleshooting(memory, plan)
@@ -2110,7 +2171,7 @@ def finish_troubleshooting(memory: Dict[str, Any], plan: Dict[str, Any]) -> Dict
     known["repair_ready"] = "no"
     known["troubleshooting_step"] = "resolved"
 
-    plan["reply"] = "太好了，已恢復正常。若後續還有狀況，隨時再告訴我。"
+    plan["reply"] = plan.pop("resolution_reply", "") or "了解，後續若仍需要協助，請再告訴我。"
     plan["should_call_tool"] = False
     plan["tool_name"] = None
 
@@ -2311,7 +2372,7 @@ def start_tv_troubleshooting(user_text: str, memory: Dict[str, Any], plan: Dict[
     known["troubleshooting_step"] = "tv_check_power"
 
     plan["reply"] = (
-        "我先帶您做幾個簡單檢查，若還是無法恢復，我再協助您建立報修工單。\n\n"
+        "我先帶您做幾個簡單檢查。\n\n"
         "請先確認機上盒電源是否有亮燈？"
     )
     plan["should_call_tool"] = False
@@ -2331,12 +2392,10 @@ def start_remote_control_troubleshooting(user_text: str, memory: Dict[str, Any],
     known["issue_description"] = user_text or "遙控器控制異常"
 
     plan["reply"] = (
-        "了解，目前比較像是遙控器控制異常。"
+        "了解，遙控器目前無法使用，我們先確認幾個基本項目。"
         "請先確認遙控器電池是否有電、正負極是否裝反，並更換新電池再試一次。\n"
         "若仍無法操作，請對準機上盒或電視感應位置，確認中間沒有遮蔽物，"
-        "並確認機上盒前方 IR 接收器沒有脫落。\n"
-        "更換電池後仍無法使用時，可能需要更換遙控器；一般型 300 元、語音型 400 元，"
-        "可臨櫃購買，實際型號與費用仍以客服確認為準。若不便自行更換，也可接續協助登記維修。"
+        "並確認機上盒前方 IR 接收器沒有脫落。"
     )
     plan["should_call_tool"] = False
     plan["tool_name"] = None
@@ -2518,7 +2577,7 @@ def start_network_troubleshooting(user_text: str, memory: Dict[str, Any], plan: 
         return plan
 
     plan["reply"] = (
-        "我先帶您做幾個簡單檢查，若還是無法恢復，我再協助您建立報修工單。\n\n"
+        "我先帶您做幾個簡單檢查。\n\n"
         "1. 請確認數據機與分享器都有亮電源燈。\n"
         "2. 將數據機與分享器的電源拔除 10 秒後再插回，等待約 3 至 5 分鐘。\n"
         "3. 確認數據機、分享器與電腦之間的網路線兩端都有插緊。\n\n"
@@ -2551,6 +2610,16 @@ def apply_tv_troubleshooting_step(
     step = known.get("troubleshooting_step")
 
     if is_tv_equipment_boot_issue(text) or is_tv_boot_loop_reply(text):
+        if step == "tv_reboot":
+            if label == "failed":
+                return switch_to_repair(memory, plan)
+            plan["reply"] = (
+                "您描述的仍是機上盒停在開機畫面。請問是否已將機上盒電源拔除約 10 秒、"
+                "重新插上並等待 2 到 3 分鐘？完成後畫面是否仍停在『開機中請稍後』？"
+            )
+            plan["should_call_tool"] = False
+            plan["tool_name"] = None
+            return plan
         known["issue_description"] = "機上盒持續重複開機或停在開機畫面"
         known["troubleshooting_step"] = "tv_reboot"
         known["retry"] = 0
@@ -2899,7 +2968,7 @@ def apply_tv_troubleshooting_step(
         if label in ["failed", "refuse"] or fallback_failed(memory, text):
             return switch_to_repair(memory, plan)
 
-        plan["reply"] = "重新插電後，畫面是否已恢復？如果還是不行，我可以協助您建立報修工單。"
+        plan["reply"] = "重新插電後，畫面是否已恢復？若仍未恢復，請告訴我結果以便接續處理。"
         return plan
 
     if step == "tv_rescan_channels":
@@ -3520,14 +3589,14 @@ def apply_network_troubleshooting_step(
             return switch_to_repair(memory, plan)
 
         if label == "failed" or fallback_failed(memory, text):
-            if is_already_rebooted_reply(text):
+            if is_already_rebooted_reply(text) or is_failed_step_outcome_reply(text):
                 known["issue_description"] = known.get("issue_description") or "網路無法連線，重開數據機後仍無法恢復"
                 return switch_to_repair(memory, plan)
-            known["troubleshooting_step"] = "net_reboot_modem"
-            known["retry"] = 0
+            if known.get("retry", 0) >= 2:
+                return switch_to_repair(memory, plan)
             plan["reply"] = (
-                "目前還無法確認是否已完成數據機重開。請先將數據機電源拔掉約 10 秒後重新插上，"
-                "等待 3 到 5 分鐘，再告訴我網路是否恢復；若您已經重開過，也請直接告訴我結果。"
+                "我再確認一下：您已按剛才的步驟重開數據機了嗎？"
+                "若已重開仍無法上網，請直接告訴我，我會協助後續處理。"
             )
             plan["should_call_tool"] = False
             plan["tool_name"] = None
@@ -3549,7 +3618,7 @@ def apply_network_troubleshooting_step(
             plan["tool_name"] = None
             return plan
 
-        plan["reply"] = "重開數據機後，網路是否已恢復？如果還是不行，我可以協助您建立報修工單。"
+        plan["reply"] = "重開數據機後，網路是否已恢復？若仍未恢復，請告訴我結果以便接續處理。"
         return plan
 
     if step == "net_single_device":
@@ -3579,9 +3648,11 @@ def apply_troubleshooting_engine(
     memory: Dict[str, Any],
     plan: Dict[str, Any],
     llm=None,
+    history: list[dict[str, str]] | None = None,
 ) -> Dict[str, Any]:
     known = memory.setdefault("known_info", {})
     text = (user_text or "").strip()
+    last_assistant_reply = latest_assistant_reply(history)
 
     # These flows are entered from the LLM's semantic intent, then continued
     # from trusted state. They do not infer a route from customer keywords.
@@ -3591,6 +3662,7 @@ def apply_troubleshooting_engine(
             memory,
             plan,
             llm=llm,
+            last_assistant_reply=last_assistant_reply,
         )
     if plan.get("intent") in SET_TOP_BOX_NETWORK_INTENTS:
         return start_set_top_box_network_troubleshooting(text, memory, plan)
@@ -3601,6 +3673,7 @@ def apply_troubleshooting_engine(
             memory,
             plan,
             llm=llm,
+            last_assistant_reply=last_assistant_reply,
         )
     if plan.get("intent") in ROUTER_PATH_SLOW_INTENTS:
         return start_router_path_troubleshooting(text, memory, plan)
@@ -4015,10 +4088,6 @@ def apply_troubleshooting_engine(
             return switch_to_repair(memory, plan)
 
     explicit_type = detect_troubleshooting_type(text)
-    # 使用者可在任何排錯步驟表示已恢復或停止，不應被當成答非所問而重複提問。
-    if is_recovered_reply(text):
-        return finish_troubleshooting(memory, plan)
-
     if is_stop_troubleshooting_reply(text):
         return stop_troubleshooting(memory, plan)
 
@@ -4117,12 +4186,15 @@ def apply_troubleshooting_engine(
         return plan
 
     known["_llm_step_classifier_used"] = "yes" if llm is not None else "no"
-    label = classify_reply(
+    decision = classify_reply(
         text,
         step,
         issue_description=known.get("issue_description") or "",
+        last_assistant_reply=last_assistant_reply,
         llm=llm,
     )
+    label = decision["label"]
+    plan["resolution_reply"] = decision["reply"]
 
     # Short terms such as "故障" and "回報故障" often mean that the customer
     # wants help with the current symptom. They must continue the SOP even if
@@ -4139,13 +4211,16 @@ def apply_troubleshooting_engine(
         "label": label,
     })
 
-    known["retry"] = known.get("retry", 0) + 1
+    if label == "recovered":
+        return finish_troubleshooting(memory, plan)
+
+    if step == "net_reboot_modem" and label == "affirmative":
+        known["retry"] = 0
+    else:
+        known["retry"] = known.get("retry", 0) + 1
 
     if known["retry"] > 2:
         return switch_to_repair(memory, plan)
-
-    if label == "recovered":
-        return finish_troubleshooting(memory, plan)
 
     if label == "refuse" and is_explicit_repair_request(text):
         known["issue_description"] = known.get("issue_description") or text
@@ -4184,6 +4259,7 @@ def apply_troubleshooting_engine(
         step == "net_reboot_modem"
         and label == "failed"
         and not is_already_rebooted_reply(text)
+        and not is_failed_step_outcome_reply(text)
     )
     if (
         label in ["failed", "refuse"]

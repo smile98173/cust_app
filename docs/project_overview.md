@@ -8,7 +8,7 @@
 
 目前系統重點：
 
-- WEB 正式串接走 `POST /api/v1/chat`，外部傳 `user_id`、`company_code`、`msg`、`is_logged_in`，若有 CUST_API 客戶編號另傳 `custnum`，由本系統保存 `chat_logs` 與 `ai_state`。
+- WEB 正式串接走 `POST /api/v1/chat`，外部傳 `user_id`、`company_code`、`msg`、`is_logged_in`；登入時 `user_id` 是客編，訪客時是流水號，由本系統保存 `chat_logs` 與 `ai_state`。
 - LINE 多 Bot 入口仍保留本機 session 與 chat logs，並透過 `customer_profiles` 同步同一 LINE 使用者已確認的系統台。
 - 每次需要新語意判斷時由 LLM-first Router 決定意圖；既有排錯、工具與授權狀態由狀態機承接。模型無法判讀時回固定暫時無法判讀訊息，不退回舊規則回答。
 - RAG 使用本地 ChromaDB 與文件上傳維護流程；回答前需通過對題與服務證據檢查。
@@ -78,7 +78,7 @@ data/customer_state.db
 
 目前重要入口：
 
-- `POST /api/v1/chat`：正式 Web server 串接，外部傳 `user_id`、`company_code`、`msg`、`is_logged_in`，若有 CUST_API 客戶編號另傳 `custnum`，由本系統保存 session/chat logs。
+- `POST /api/v1/chat`：正式 Web server 串接，`is_logged_in=true` 時 `user_id` 是客編，`false` 時是流水號；由本系統保存 session/chat logs。
 - `POST /api/web/chat`：WEB 測試入口，使用本機 session/chat logs。
 - `POST /api/line/{bot_code}/webhook`：LINE webhook，多 Bot 入口。
 - `GET /state/{user_id}`：測試/除錯用，查目前 memory。

@@ -90,7 +90,7 @@ route 執行
 - 依本輪文字、可信 memory 與必要的最近對話載入的規則包：`promotion`、`support`、`billing`、`termination`、`network`、`services`。
 - 只有相符模組的 intent 索引與區域政策；未辨識的新說法會保守載入全部模組，不會因選包器漏詞而靜默遺失意圖。
 
-模組選擇器只決定模型可看到哪些參考規則，不可輸出 route、intent、答案或工具；語意決策仍由 LLM 完成。新增 intent 時，必須同時放入 `RUNTIME_PROMPT_CORE_INTENTS` 或 `RUNTIME_PROMPT_INTENT_MODULES`，`test_prompt_usage_optimization.py` 會檢查 84 個執行 intent 是否完整覆蓋。
+模組選擇器只決定模型可看到哪些參考規則，不可輸出 route、intent、答案或工具；語意決策仍由 LLM 完成。新增 intent 時，必須同時放入 `RUNTIME_PROMPT_CORE_INTENTS` 或 `RUNTIME_PROMPT_INTENT_MODULES`，`test_prompt_usage_optimization.py` 會檢查 86 個執行 intent 是否完整覆蓋。
 
 完整 14K prompt 仍由 `build_runtime_intent_router_rules()` 保留作審查與覆蓋基準；正式呼叫使用 `build_contextual_runtime_intent_router_rules()`。不要為了省 token 刪除完整版規則，也不要把模組線索改成直接回答客戶的 fast path。
 

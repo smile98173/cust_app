@@ -763,6 +763,20 @@ class ToolManagerTest(unittest.TestCase):
         self.assertEqual(len(schema["anyOf"]), 3)
         self.assertNotIn("service_address", schema["properties"])
 
+    def test_reconnection_tool_schemas_allow_unpaid_application_with_identity_check(self):
+        schemas = {
+            item["name"]: item
+            for item in get_available_functions({"known_info": {}})
+        }
+
+        for tool_name in ("bill_return_line_internet", "bill_return_line_tv"):
+            with self.subTest(tool_name=tool_name):
+                tool = schemas[tool_name]
+                self.assertIn("未繳費時申請", tool["description"])
+                self.assertIn("是否受理以 API 回覆為準", tool["description"])
+                self.assertIn("已繳費要求復線應先上傳超商收據", tool["description"])
+                self.assertEqual(len(tool["parameters"]["anyOf"]), 3)
+
     def test_call_tool_identity_apis_use_custnum_from_memory(self):
         send_result = call_tool(
             "send_message",

@@ -7,7 +7,7 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +62,23 @@ SYNC_CURSOR_KEYS = {
 
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="microseconds")
+
+
+def tracking_timestamp_is_newer(incoming: str, current: str | None) -> bool:
+    if not current:
+        return True
+    try:
+        incoming_time = datetime.fromisoformat(incoming)
+        current_time = datetime.fromisoformat(current)
+    except ValueError:
+        return incoming > current
+    # Older tracker rows used naive Taiwan-local time; rerun exports may use UTC.
+    legacy_timezone = timezone(timedelta(hours=8))
+    if incoming_time.tzinfo is None:
+        incoming_time = incoming_time.replace(tzinfo=legacy_timezone)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=legacy_timezone)
+    return incoming_time > current_time
 
 
 def tracker_db_conn() -> sqlite3.Connection:
@@ -665,6 +682,7 @@ def apply_tracking_update_bundle(payload: dict[str, Any]) -> int:
     applied = 0
     conn = tracker_db_conn()
     try:
+        conn.execute("BEGIN IMMEDIATE")
         for row in payload.get("case_definitions") or []:
             case_id = str(row.get("case_id") or "").strip()
             if not case_id:
@@ -707,6 +725,12 @@ def apply_tracking_update_bundle(payload: dict[str, Any]) -> int:
         for row in payload.get("feedback_states") or []:
             if not row.get("feedback_id") or not row.get("updated_at"):
                 continue
+            current = conn.execute(
+                "SELECT updated_at FROM feedback_tracker_state WHERE feedback_id=?",
+                (row["feedback_id"],),
+            ).fetchone()
+            if current and not tracking_timestamp_is_newer(row["updated_at"], current["updated_at"]):
+                continue
             cursor = conn.execute(
                 """
                 INSERT INTO feedback_tracker_state (
@@ -735,7 +759,6 @@ def apply_tracking_update_bundle(payload: dict[str, Any]) -> int:
                     ),
                     deleted_at=COALESCE(excluded.deleted_at, feedback_tracker_state.deleted_at),
                     updated_at=excluded.updated_at, updated_by=excluded.updated_by
-                WHERE excluded.updated_at > feedback_tracker_state.updated_at
                 """,
                 (
                     row.get("feedback_id"), normalize_feedback_status(row.get("status")),
@@ -752,16 +775,22 @@ def apply_tracking_update_bundle(payload: dict[str, Any]) -> int:
         for row in payload.get("case_states") or []:
             if not row.get("case_id") or not row.get("updated_at"):
                 continue
+            current = conn.execute(
+                "SELECT updated_at FROM regression_cases WHERE case_id=?",
+                (row["case_id"],),
+            ).fetchone()
+            if not current or not tracking_timestamp_is_newer(row["updated_at"], current["updated_at"]):
+                continue
             cursor = conn.execute(
                 """
                 UPDATE regression_cases
                 SET status=?, owner=?, review_status=?, review_note=?, updated_at=?, updated_by=?
-                WHERE case_id=? AND updated_at < ?
+                WHERE case_id=?
                 """,
                 (
                     row.get("status") or DEFAULT_CASE_STATUS, row.get("owner"),
                     row.get("review_status") or DEFAULT_REVIEW_STATUS, row.get("review_note"),
-                    row.get("updated_at"), row.get("updated_by"), row.get("case_id"), row.get("updated_at"),
+                    row.get("updated_at"), row.get("updated_by"), row.get("case_id"),
                 ),
             )
             applied += int(cursor.rowcount > 0)

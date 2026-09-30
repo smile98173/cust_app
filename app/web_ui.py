@@ -1283,7 +1283,7 @@ theme_vars = {
         "readonly_text": "#e5e7eb",
         "readonly_border": "rgba(148, 163, 184, 0.42)",
         "user_bubble": "#1b202b",
-        "assistant_bubble": "transparent",
+        "assistant_bubble": "#1b202b",
         "accent": "#e11d48",
         "accent_2": "#fb7185",
         "accent_soft": "rgba(244, 63, 94, 0.16)",
@@ -1720,11 +1720,17 @@ st.markdown(f"""
 [data-testid="stChatMessage"] .chat-text {{
     display: inline-block;
     width: fit-content;
-    max-width: min(86vw, 1200px);
+    max-width: min(78vw, 900px);
     padding: 0.75rem 1rem;
     border-radius: 0.6rem;
     background: var(--cust-assistant-bubble) !important;
     color: var(--cust-text) !important;
+}}
+
+@media (max-width: 760px) {{
+    [data-testid="stChatMessage"] .chat-text {{
+        max-width: calc(100vw - 5rem);
+    }}
 }}
 
 [data-testid="stChatMessage"]:has(.chat-role-marker-user) .chat-text {{
